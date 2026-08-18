@@ -192,14 +192,17 @@ export async function resolvePathPluginTarget(spec: string) {
 }
 
 export async function checkPluginCompatibility(target: string, opencodeVersion: string, pkg?: PluginPackage) {
-  if (!semver.valid(opencodeVersion) || semver.major(opencodeVersion) === 0) return
+  // 本地补丁构建的版本号带 -<sha> 后缀（如 1.18.18-abc1234），semver 将其解析为 prerelease，
+  // 导致 satisfies 对正式版本范围（如 >=1.3.13）一律判 false。剥离后缀后再比较。
+  const baseVersion = opencodeVersion.replace(/-[0-9a-f]{7,40}$/, "")
+  if (!semver.valid(baseVersion) || semver.major(baseVersion) === 0) return
   const hit = pkg ?? (await readPluginPackage(target).catch(() => undefined))
   if (!hit) return
   const engines = hit.json.engines
   if (!isRecord(engines)) return
   const range = engines.opencode
   if (typeof range !== "string") return
-  if (!semver.satisfies(opencodeVersion, range)) {
+  if (!semver.satisfies(baseVersion, range)) {
     throw new Error(`Plugin requires opencode ${range} but running ${opencodeVersion}`)
   }
 }
