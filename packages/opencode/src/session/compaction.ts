@@ -27,7 +27,11 @@ export const Event = SessionCompactionEvent
 
 export const PRUNE_MINIMUM = 20_000
 export const PRUNE_PROTECT = 40_000
-const TOOL_OUTPUT_MAX_CHARS = 2_000
+const TOOL_OUTPUT_MAX_CHARS = 500
+const TOOL_INPUT_MAX_CHARS = 300
+// knockout: 压缩总结只保留最近 REASONING_RETAIN_CHARS 字符的 reasoning（思考过程供参考），更早的丢弃；
+// 若未来单次增量的 text 部分本身超过模型上限，需升级为分批压缩（chunked compaction）
+const REASONING_RETAIN_CHARS = 300_000
 const PRUNE_PROTECTED_TOOLS = ["skill"]
 const MIN_PRESERVE_RECENT_TOKENS = 2_000
 const MAX_PRESERVE_RECENT_TOKENS = 15_000
@@ -68,7 +72,10 @@ const serialize = (message: SessionV1.WithParts) => {
       if (part.type === "text") return part.text ? [`[Assistant]: ${part.text}`] : []
       if (part.type === "reasoning") return part.text ? [`[Assistant reasoning]: ${part.text}`] : []
       if (part.type !== "tool") return []
-      const call = `[Assistant tool call]: ${part.tool}(${JSON.stringify(part.state.input)})`
+      const callInput = JSON.stringify(part.state.input)
+      const call = `[Assistant tool call]: ${part.tool}(${
+        callInput.length > TOOL_INPUT_MAX_CHARS ? `${callInput.slice(0, TOOL_INPUT_MAX_CHARS)}...` : callInput
+      })`
       if (part.state.status === "completed") {
         const attachments = (part.state.attachments ?? []).map(
           (item) => `[Attached ${item.mime}: ${item.filename ?? "file"}]`,
@@ -377,6 +384,22 @@ const layer = Layer.effect(
       )
       const msgs = structuredClone(selected.head)
       yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
+      // 保留最近 REASONING_RETAIN_CHARS 字符的 reasoning（供总结参考决策思路），更早的置空
+      let reasoningBudget = REASONING_RETAIN_CHARS
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        for (let j = msgs[i].parts.length - 1; j >= 0; j--) {
+          const part = msgs[i].parts[j]
+          if (part.type !== "reasoning" || !part.text) continue
+          if (reasoningBudget <= 0) {
+            part.text = ""
+          } else if (part.text.length > reasoningBudget) {
+            part.text = part.text.slice(part.text.length - reasoningBudget)
+            reasoningBudget = 0
+          } else {
+            reasoningBudget -= part.text.length
+          }
+        }
+      }
       const conversation = msgs.map(serialize).filter(Boolean).join("\n\n")
       const nextPrompt =
         compacting.prompt ??
