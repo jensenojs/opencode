@@ -518,7 +518,18 @@ export const get = Effect.fn("MessageV2.get")(function* (input: { sessionID: Ses
   }
 })
 
-export function filterCompacted(msgs: Iterable<WithParts>) {
+/** fail-open 兜底消息条数：无任何成功压缩边界时只发最近 N 条，绝不发全量 */
+const FALLBACK_TAIL_MESSAGES = 50
+
+export function filterCompacted(msgs: Iterable<WithParts>): WithParts[] {
+  return filterCompactedDetailed(msgs).messages
+}
+
+export function filterCompactedDetailed(msgs: Iterable<WithParts>): {
+  messages: WithParts[]
+  degraded: boolean
+  reason?: string
+} {
   const result = [] as WithParts[]
   const completed = new Set<string>()
   let retain: MessageID | undefined
@@ -542,37 +553,67 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
       completed.add(msg.info.parentID)
   }
   result.reverse()
+  // 只认「摘要成功（completed）+ tail_start_id 非 null」的 compaction 边界：
+  // 失败压缩产物（摘要 error 或 tail_start_id=null）被跳过，自然回退到上一个成功边界
   const compactionIndex = result.findLastIndex(
     (msg) =>
       msg.info.role === "user" &&
-      msg.parts.some((item): item is CompactionPart => item.type === "compaction" && item.tail_start_id !== undefined),
+      completed.has(msg.info.id) &&
+      msg.parts.some((item): item is CompactionPart => item.type === "compaction" && item.tail_start_id != null),
   )
   const compaction = result[compactionIndex]
   const part = compaction?.parts.find(
-    (item): item is CompactionPart => item.type === "compaction" && item.tail_start_id !== undefined,
+    (item): item is CompactionPart => item.type === "compaction" && item.tail_start_id != null,
   )
+  // #42283 guard：summary 判定与第一遍 completed 一致（finish 且无 error），失败摘要不当作有效边界
   const summaryIndex = compaction
     ? result.findIndex(
         (msg, index) =>
           index > compactionIndex &&
           msg.info.role === "assistant" &&
           msg.info.summary &&
+          msg.info.finish &&
+          !msg.info.error &&
           msg.info.parentID === compaction.info.id,
       )
     : -1
   const tailIndex = part?.tail_start_id ? result.findIndex((msg) => msg.info.id === part.tail_start_id) : -1
   if (tailIndex >= 0 && tailIndex < compactionIndex && summaryIndex > compactionIndex) {
-    return [
-      ...result.slice(compactionIndex, summaryIndex + 1),
-      ...result.slice(tailIndex, compactionIndex),
-      ...result.slice(summaryIndex + 1),
-    ]
+    return {
+      messages: [
+        ...result.slice(compactionIndex, summaryIndex + 1),
+        ...result.slice(tailIndex, compactionIndex),
+        ...result.slice(summaryIndex + 1),
+      ],
+      degraded: false,
+    }
   }
-  return result
+  // 降级链：绝不返回全量。有成功边界但组装条件不满足（tail 消息丢失等）→ 从该边界之后发
+  if (compactionIndex >= 0) {
+    return {
+      messages: result.slice(compactionIndex),
+      degraded: true,
+      reason: `compaction boundary incomplete: tailIndex=${tailIndex}, summaryIndex=${summaryIndex}, compactionIndex=${compactionIndex}`,
+    }
+  }
+  // 无任何成功压缩边界（从未压缩或全部失败）→ 最近 N 条兜底
+  return {
+    messages: result.slice(-FALLBACK_TAIL_MESSAGES),
+    degraded: true,
+    reason: `no valid compaction boundary found; falling back to last ${FALLBACK_TAIL_MESSAGES} messages`,
+  }
 }
 
 export const filterCompactedEffect = Effect.fnUntraced(function* (sessionID: SessionID) {
-  return filterCompacted(yield* stream(sessionID))
+  const { messages, degraded, reason } = filterCompactedDetailed(yield* stream(sessionID))
+  if (degraded) {
+    yield* Effect.logWarning("filterCompacted degraded (fail-open prevented)", {
+      "session.id": sessionID,
+      reason,
+      "messages.length": messages.length,
+    })
+  }
+  return messages
 })
 
 // filterCompacted reorders messages for model consumption

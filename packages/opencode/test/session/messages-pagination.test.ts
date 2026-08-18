@@ -966,6 +966,101 @@ describe("MessageV2.filterCompacted", () => {
     expect(result).toHaveLength(1)
     expect(result[0].info.id).toBe(id)
   })
+
+  it.instance("skips failed compaction and falls back to previous successful boundary", () =>
+    withSession(({ session, sessionID }) =>
+      Effect.gen(function* () {
+        // 成功压缩: c1(tail=u1) + s1(summary 成功)
+        const u1 = yield* addUser(sessionID, "old history")
+        const a1 = yield* addAssistant(sessionID, u1, { finish: "end_turn" })
+        yield* session.updatePart({
+          id: PartID.ascending(),
+          sessionID,
+          messageID: a1,
+          type: "text",
+          text: "old reply",
+        })
+        const c1 = yield* addUser(sessionID)
+        yield* addCompactionPart(sessionID, c1, u1)
+        const s1 = yield* addAssistant(sessionID, c1, { summary: true, finish: "end_turn" })
+        yield* session.updatePart({
+          id: PartID.ascending(),
+          sessionID,
+          messageID: s1,
+          type: "text",
+          text: "summary",
+        })
+
+        // 失败压缩: c2(compaction 但 tail_start_id 缺失) + s2(summary 但 error)
+        const u2 = yield* addUser(sessionID, "new history")
+        const a2 = yield* addAssistant(sessionID, u2, { finish: "end_turn" })
+        yield* session.updatePart({
+          id: PartID.ascending(),
+          sessionID,
+          messageID: a2,
+          type: "text",
+          text: "new reply",
+        })
+        const c2 = yield* addUser(sessionID)
+        yield* addCompactionPart(sessionID, c2) // tail_start_id 缺失 → 失败产物
+        const error = new SessionV1.APIError({
+          message: "boom",
+          isRetryable: true,
+        }).toObject() as SessionV1.Assistant["error"]
+        const s2 = yield* addAssistant(sessionID, c2, { summary: true, finish: "end_turn", error })
+
+        const result = MessageV2.filterCompacted(yield* MessageV2.stream(sessionID))
+        // 失败压缩被跳过，回退到 c1 边界：从 c1 开始
+        expect(result.map((item) => item.info.id)[0]).toBe(c1)
+        // 失败产物 (c2, s2) 作为边界后的新内容保留
+        expect(result.map((item) => item.info.id)).toEqual([c1, s1, u1, a1, u2, a2, c2, s2])
+      }),
+    ),
+  )
+
+  it.instance("degrades to boundary-start when tail_start_id message is missing", () =>
+    withSession(({ session, sessionID }) =>
+      Effect.gen(function* () {
+        const u1 = yield* addUser(sessionID, "old history")
+        const c1 = yield* addUser(sessionID)
+        yield* addCompactionPart(sessionID, c1, u1)
+        const s1 = yield* addAssistant(sessionID, c1, { summary: true, finish: "end_turn" })
+        yield* session.updatePart({
+          id: PartID.ascending(),
+          sessionID,
+          messageID: s1,
+          type: "text",
+          text: "summary",
+        })
+        const u2 = yield* addUser(sessionID, "new question")
+        const a2 = yield* addAssistant(sessionID, u2, { finish: "end_turn" })
+
+        // 删除 tail 消息 u1，模拟 tail_start_id 指向不存在的消息
+        yield* session.removeMessage({ sessionID, messageID: u1 })
+
+        const detailed = MessageV2.filterCompactedDetailed(yield* MessageV2.stream(sessionID))
+        expect(detailed.degraded).toBe(true)
+        expect(detailed.reason).toContain("compaction boundary incomplete")
+        // 降级 = 从成功边界之后发（c1, s1, u2, a2），不发全量
+        expect(detailed.messages.map((item) => item.info.id)).toEqual([c1, s1, u2, a2])
+      }),
+    ),
+  )
+
+  it.instance("degrades to last N messages when no successful compaction exists", () =>
+    withSession(({ sessionID }) =>
+      Effect.gen(function* () {
+        // 60 条消息，无任何压缩
+        yield* fill(sessionID, 60)
+
+        const detailed = MessageV2.filterCompactedDetailed(yield* MessageV2.stream(sessionID))
+        expect(detailed.degraded).toBe(true)
+        expect(detailed.reason).toContain("no valid compaction boundary")
+        // 只发最近 50 条，绝不全量 60 条
+        expect(detailed.messages).toHaveLength(50)
+      }),
+    ),
+  )
 })
 
 describe("MessageV2.cursor", () => {
