@@ -17,4 +17,8 @@ if (process.versions.bun !== expectedBunVersion) {
   console.warn(`Warning: Bun version ${process.versions.bun} differs from expected ${expectedBunVersion}`);
 }
 '
-bun typecheck
+# knockout(jensenojs): pre-push 不再跑全仓 typecheck。
+# 原因：turbo 并发拉起 ~8 个 tsgo 实例 × ~1GB anon，在 13GB 内存的机器上
+# 直接触发内核 OOM 连环杀进程（2026-08-24 一天两轮风暴，mihomo/systemd --user 陪葬）。
+# 构建管线 opencode-local-build.py 此前已因同样原因跳过 typecheck（4.1GB 峰值），
+# 此处与之一致。需要全量类型检查时在开发机上手动 bun typecheck。
