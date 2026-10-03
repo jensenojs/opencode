@@ -462,6 +462,9 @@ export type FooterApi = {
   onPrompt(fn: (input: RunPrompt) => void): () => void
   onClose(fn: () => void): () => void
   event(next: FooterEvent): void
+  setPrefill(text: string): void
+  peekPrefill(): string | undefined
+  clearPrefill(): void
   append(commit: StreamCommit): void
   idle(): Promise<void>
   close(): void

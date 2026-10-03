@@ -370,6 +370,10 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
         ),
         agent: Flag.string("agent").pipe(Flag.withDescription("Agent to use"), Flag.optional),
         prompt: Flag.string("prompt").pipe(Flag.withDescription("Prompt to use"), Flag.optional),
+        prefill: Flag.string("prefill").pipe(
+          Flag.withDescription("Seed the composer with text without sending it"),
+          Flag.optional,
+        ),
         demo: Flag.boolean("demo").pipe(Flag.withDefault(false), Flag.withHidden),
       },
     }),

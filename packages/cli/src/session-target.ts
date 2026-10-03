@@ -38,6 +38,9 @@ export async function resolveSessionTarget(input: {
   model?: ModelRef
   agent?: string
   environment?: Readonly<Record<string, string>>
+  // When resuming an explicit -s session, use the caller's location instead of the
+  // session's stored directory, so tools run where the user is now.
+  followCwdOnResume?: boolean
   prepare: SessionTargetPreparation
   signal?: AbortSignal
 }): Promise<SessionTarget> {
@@ -47,7 +50,7 @@ export async function resolveSessionTarget(input: {
     selection.location ??
     (await resolveLocation(
       input.client,
-      selected ? { directory: selected.location.directory } : input.location,
+      selected && !input.followCwdOnResume ? { directory: selected.location.directory } : input.location,
       input.signal,
     ))
   const prepared = await input.prepare({

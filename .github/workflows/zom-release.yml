@@ -1,0 +1,58 @@
+# Release builds for the zom fork of opencode (branch zom-inline-resume).
+#
+# Fork release flow: when upstream cuts a new tag,
+#   git fetch upstream && git checkout v2.0.NN
+#   git cherry-pick <squash-commit>   # or rebase; resolve conflicts here
+#   git tag zom-v2.0.NN && git push origin zom-v2.0.NN
+# CI then builds per-platform single-file binaries and attaches them to a
+# GitHub Release named after the tag. Install = scripts/install-zom-binary.sh
+# (downloads to ~/.local/bin/opencode-zom); the zsh plugin uses it by default.
+name: zom-release
+
+on:
+  push:
+    tags: ["zom-v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-14, target: darwin-arm64 }
+          - { os: ubuntu-24.04, target: linux-x64 }
+          - { os: ubuntu-24.04-arm, target: linux-arm64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.2"
+      - name: Install dependencies
+        run: bun install
+      - name: Build single-file binary
+        run: bun run --cwd packages/cli build --single --skip-web-ui --skip-install
+      - name: Collect binary
+        run: |
+          mkdir -p out
+          cp packages/cli/dist/cli-*/bin/opencode out/opencode-zom-${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: opencode-zom-${{ matrix.target }}
+          path: out/opencode-zom-${{ matrix.target }}
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: opencode-zom-*
