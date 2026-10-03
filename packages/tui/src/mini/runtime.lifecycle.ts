@@ -9,11 +9,13 @@
 // Also wires SIGINT so Ctrl-c clears a live prompt draft first, then falls
 // back to the usual two-press exit sequence through RunFooter.requestExit().
 import path from "path"
+import { appendFileSync, writeSync } from "fs"
 import {
   CliRenderEvents,
   buildKittyKeyboardFlags,
   createCliRenderer,
   type CliRenderer,
+  type KeyEvent,
   type ScrollbackWriter,
 } from "@opentui/core"
 import { isFallbackTitle } from "@opencode/util/session-title-fallback"
@@ -297,6 +299,53 @@ export async function createRuntimeLifecycle(input: LifecycleInput): Promise<Lif
 
   attachSigint()
 
+  // Passthrough for keys nobody claims (zom fork): when ZOM_PASSTHROUGH_FILE
+  // is set, a key event that survives the keymap (no defaultPrevented /
+  // propagationStopped) and is not printable composer input is written to the
+  // file as raw bytes and mini closes gracefully. The zsh widget replays the
+  // bytes into ZLE, so the key takes effect in the shell instead of being
+  // swallowed. Printable input and editor-claimed keys are left alone.
+  const passthroughFile = process.env.ZOM_PASSTHROUGH_FILE
+  let detachPassthrough: (() => void) | undefined
+  if (passthroughFile) {
+    const onPassthroughKey = (event: KeyEvent) => {
+      if (event.defaultPrevented || event.propagationStopped) {
+        return
+      }
+      const printable =
+        event.name.length === 1 && !event.ctrl && !event.meta && !event.option && !event.super && !event.shift
+      if (printable) {
+        return
+      }
+      // Escape participates in pending-sequence handling and modal dismissal;
+      // with nothing pending it is unclaimed by design. Never hand it to the
+      // shell — that would close mini on a stray Esc.
+      if (event.name === "escape") {
+        return
+      }
+      // Component useKeyboard handlers (permission dialog enter/arrows, the
+      // command palette, forms) sit on this same keyInput bus but register
+      // later, so their preventDefault() has not run yet when this listener
+      // fires. Decide only after the dispatch settles: a key a dialog claims
+      // must never reach the shell.
+      setImmediate(() => {
+        if (event.defaultPrevented || event.propagationStopped) {
+          return
+        }
+        try {
+          appendFileSync(passthroughFile, Buffer.from(event.raw ?? "", "binary"))
+        } catch {
+          // Unwritable passthrough target must not block the exit path.
+        }
+        footer.close()
+      })
+    }
+    renderer.keyInput.on("keypress", onPassthroughKey)
+    detachPassthrough = () => {
+      renderer.keyInput.off("keypress", onPassthroughKey)
+    }
+  }
+
   const close = async (next: {
     showExit: boolean
     sessionTitle?: string
@@ -309,6 +358,27 @@ export async function createRuntimeLifecycle(input: LifecycleInput): Promise<Lif
 
     closed = true
     detachSigint()
+    detachPassthrough?.()
+    // Startup queries the kitty keyboard protocol (CSI ? u); WezTerm treats
+    // the query as protocol detection and starts encoding keys kitty-style
+    // until it sees the pop (CSI < u). opentui never pops — destroy resets
+    // modifyOtherKeys, bracketed paste, and mode 2031 but leaves kitty and
+    // mode 2027 on, so ctrl combos land in the shell as literal "20;5u".
+    // Write the pops in the process exit hook: stdout is back to direct
+    // writes by then, and an empty pop stack is ignored per spec.
+    try {
+      if (process.stdout.isTTY) {
+        process.once("exit", () => {
+          try {
+            writeSync(1, "\x1b[<u\x1b[?2027l")
+          } catch {
+            // Terminal already gone.
+          }
+        })
+      }
+    } catch {
+      // Non-TTY contexts (tests, pipes) need nothing.
+    }
     let wroteExit = false
 
     try {

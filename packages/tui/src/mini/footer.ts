@@ -352,6 +352,10 @@ export class RunFooter implements FooterApi {
               },
               miniSettings: footer.miniSettings,
               history: footer.history,
+              onPrefillApplied: () => footer.clearPrefill(),
+              get prefill() {
+                return footer.peekPrefill()
+              },
               onSubmit: footer.handlePrompt,
               onPermissionReply: footer.handlePermissionReply,
               onFormReply: footer.handleFormReply,
@@ -414,6 +418,21 @@ export class RunFooter implements FooterApi {
 
   private get isGone(): boolean {
     return this.destroyed || this.renderer.isDestroyed
+  }
+
+  // Seeded composer text, consumed by the view once the composer applied it.
+  private prefill: string | undefined
+
+  public setPrefill(text: string): void {
+    this.prefill = text
+  }
+
+  public peekPrefill(): string | undefined {
+    return this.prefill
+  }
+
+  public clearPrefill(): void {
+    this.prefill = undefined
   }
 
   public onPrompt(fn: (input: RunPrompt) => void): () => void {

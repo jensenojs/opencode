@@ -10,7 +10,7 @@
 /** @jsxImportSource @opentui/solid */
 import { useRenderer, useTerminalDimensions } from "@opentui/solid"
 import { TextBuffer, TextBufferView } from "@opentui/core"
-import { For, Match, Show, Switch, createEffect, createMemo, createSignal, onCleanup } from "solid-js"
+import { For, Match, Show, Switch, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js"
 import { OneCellSpinner } from "../component/one-cell-spinner"
 import { WORK_SPINNERS, SEED_LAUNCH, SEED_MONO } from "../ui/one-cell-motion"
 import { entrySplashLayout } from "./splash"
@@ -102,6 +102,8 @@ type RunFooterViewProps = {
   mono: boolean
   miniSettings: () => MiniSettings
   history?: () => RunPrompt[]
+  prefill?: string
+  onPrefillApplied?: () => void
   clipboard?: Pick<ClipboardService, "read">
   onSubmit: (input: RunPrompt) => boolean | Promise<boolean>
   onPermissionReply: (input: PermissionReply) => void | Promise<void>
@@ -394,6 +396,25 @@ export function RunFooterView(props: RunFooterViewProps) {
     onRows: setPromptRows,
     onStatus: props.onStatus,
   })
+  onMount(() => {
+    // The prefill may be set just before or just after this view mounts
+    // (footer construction order), so poll briefly for it to appear.
+    let tries = 0
+    const t = setInterval(() => {
+      tries += 1
+      const text = props.prefill
+      if (text) {
+        const seed: RunPrompt = { text, parts: [] }
+        composer.replacePrompt(seed, stringWidth(text))
+        if (composer.current().text === text) {
+          props.onPrefillApplied?.()
+          clearInterval(t)
+        }
+      }
+      if (tries > 100) clearInterval(t)
+    }, 100)
+    onCleanup(() => clearInterval(t))
+  })
   const shell = createMemo(() => prompt() && composer.shell())
   const menu = createMemo(() => prompt() && composer.visible())
   const stateStatus = createMemo(() => props.state().status.trim())
@@ -554,6 +575,54 @@ export function RunFooterView(props: RunFooterViewProps) {
         title: "Clear screen",
         group: "System",
         run: clearScreen,
+      },
+    ],
+  }))
+
+  // Single-key suspend back to the shell (mini keeps running on the server;
+  // the shell repaints and a later resume picks the session back up). Gated to
+  // idle with an empty composer so it never races the interrupt key during a
+  // running turn. Reuses the upstream "terminal.suspend" action (shared
+  // keybind table, default ctrl+z) so it is rebindable via cli.json like the
+  // main TUI's suspend.
+  Keymap.createLayer(() => ({
+    enabled:
+      active().type === "prompt" &&
+      route().type === "composer" &&
+      !composer.visible() &&
+      !busy() &&
+      composer.current().text === "",
+    priority: 1,
+    commands: [
+      {
+        id: "terminal.suspend",
+        title: "Suspend to shell",
+        group: "System",
+        run: () => props.onExit?.(),
+      },
+    ],
+  }))
+
+  // ctrl+x dismisses mini back to the shell — the mirror of the zsh-side
+  // summon key, so the assistant toggles with one key. Only this layer binds
+  // "zom.dismiss" (the shared keybind entry is inert in the main TUI, where
+  // ctrl+x stays the leader), and the same empty-composer gating as suspend
+  // keeps it out of running turns; with text in the composer, ctrl+x still
+  // reaches prompt.clear and clears the input first.
+  Keymap.createLayer(() => ({
+    enabled:
+      active().type === "prompt" &&
+      route().type === "composer" &&
+      !composer.visible() &&
+      !busy() &&
+      composer.current().text === "",
+    priority: 1,
+    commands: [
+      {
+        id: "zom.dismiss",
+        title: "Hide mini (back to shell)",
+        group: "System",
+        run: () => props.onExit?.(),
       },
     ],
   }))
