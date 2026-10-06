@@ -394,7 +394,6 @@ export function RunFooterView(props: RunFooterViewProps) {
     onInputClear: props.onInputClear,
     onExitRequest: props.onExitRequest,
     onExit: props.onExit,
-    onSuspend: props.onSuspend,
     onSettings: openSettings,
     onRows: setPromptRows,
     onStatus: props.onStatus,
