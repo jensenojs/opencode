@@ -211,6 +211,37 @@ export async function createRuntimeLifecycle(input: LifecycleInput): Promise<Lif
   let sigintRegistered = false
   let detachSigintListener: (() => void) | undefined
 
+  // True suspend (SIGTSTP) for ctrl+z: the process stops, the shell gets the
+  // tty back immediately, and a later `fg` resumes in milliseconds — the
+  // session never leaves the server. Two entry points converge on onTstp:
+  // the keymap layer in RunFooter (raw mode: ctrl+z arrives as a key event)
+  // and this global SIGTSTP handler (cooked mode: the tty's VSUSP turns
+  // ctrl+z into a kernel SIGTSTP for the foreground group and no byte
+  // reaches the app — bun installs no default stop for SIGTSTP, so without
+  // the handler the signal would be swallowed). Once a handler is installed
+  // a delivered SIGTSTP no longer stops the process, so onTstp re-raises
+  // with the default disposition before stopping, and restores the handler
+  // on SIGCONT. renderer.suspend() stops the render loop, and with no other
+  // ref'd handle the bun event loop drains and the process exits before
+  // SIGTSTP can stop it — a placeholder timer keeps the loop alive while
+  // the process is stopped.
+  let suspended = false
+  const onTstp = () => {
+    if (suspended) return
+    suspended = true
+    const keepAlive = setInterval(() => {}, 1 << 30)
+    renderer.suspend()
+    process.off("SIGTSTP", onTstp)
+    process.once("SIGCONT", () => {
+      suspended = false
+      clearInterval(keepAlive)
+      process.on("SIGTSTP", onTstp)
+      renderer.resume()
+    })
+    process.kill(process.pid, "SIGTSTP")
+  }
+  process.on("SIGTSTP", onTstp)
+
   const footer = new RunFooter(renderer, {
     directory: input.getDirectory,
     findFiles: input.findFiles,
@@ -242,6 +273,7 @@ export async function createRuntimeLifecycle(input: LifecycleInput): Promise<Lif
     onPermissionReply: input.onPermissionReply,
     onFormReply: input.onFormReply,
     onFormCancel: input.onFormCancel,
+    onSuspend: () => onTstp(),
     onCycleVariant: input.onCycleVariant,
     onAgentSelect: input.onAgentSelect,
     onModelSelect: input.onModelSelect,

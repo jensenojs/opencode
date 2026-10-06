@@ -102,6 +102,9 @@ type RunFooterOptions = {
   onInterrupt?: () => void
   onBackground?: () => void
   onQueuedPromptAction?: (action: QueuedPromptAction, inboxID: string) => Promise<void>
+  // True SIGTSTP suspend (ctrl+z): stop the process, hand the tty back to the
+  // shell; `fg` resumes via SIGCONT. Optional — falls back to onExit.
+  onSuspend?: () => void
   onEditorOpen: (input: { value: string }) => Promise<string | undefined>
   onSubagentSelect?: (sessionID: string | undefined) => void
   onSubagentInterrupt?: (sessionID: string) => void
@@ -372,6 +375,7 @@ export class RunFooter implements FooterApi {
               onExitRequest: footer.handleExit,
               onRequestExit: footer.setRequestExitHandler,
               onExit: () => footer.close(),
+              onSuspend: options.onSuspend,
               onAgentSelect: footer.handleAgentSelect,
               onModelSelect: footer.handleModelSelect,
               onVariantSelect: footer.handleVariantSelect,
