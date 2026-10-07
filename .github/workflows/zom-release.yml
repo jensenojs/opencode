@@ -36,6 +36,14 @@ jobs:
         run: bun install
       - name: Build single-file binary
         run: bun run --cwd packages/cli build --single --skip-web-ui --skip-install
+        env:
+          # Pin the data-plane channel so every zom artifact (branch builds and
+          # Release builds alike) shares one sqlite file (opencode-zom.db).
+          # Unpinned, the channel falls back to `git branch --show-current`,
+          # which is empty on CI checkouts (detached HEAD at a tag) and the
+          # branch name locally — each variant would get its own database and
+          # the assistant session history would fragment per build provenance.
+          OPENCODE_CHANNEL: zom
       - name: Collect binary
         run: |
           mkdir -p out
