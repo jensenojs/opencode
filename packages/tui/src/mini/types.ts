@@ -448,6 +448,10 @@ export type StreamCommit = {
   shell?: {
     command: string
   }
+  // Replay-phase commit: the text is already complete on disk, so the
+  // scrollback surface must render it in one static frame instead of
+  // streaming it chunk by chunk (the settle tail the summon key pays for).
+  settled?: true
 }
 
 export type LocalReplayRow = {

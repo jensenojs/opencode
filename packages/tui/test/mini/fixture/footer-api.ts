@@ -11,6 +11,7 @@ export function createFooterApiFixture(input: { events?: FooterEvent[]; commits?
   const commits = input.commits ?? []
   const calls: Array<{ type: "event"; value: FooterEvent } | { type: "commit"; value: StreamCommit }> = []
   let closed = false
+  let prefill: string | undefined = undefined
 
   const api: FooterApi = {
     get isClosed() {
@@ -38,6 +39,15 @@ export function createFooterApiFixture(input: { events?: FooterEvent[]; commits?
       calls.push({ type: "commit", value: next })
     },
     idle: () => Promise.resolve(),
+    setPrefill(text: string) {
+      prefill = text
+    },
+    peekPrefill() {
+      return prefill
+    },
+    clearPrefill() {
+      prefill = undefined
+    },
     close() {
       if (closed) return
       closed = true

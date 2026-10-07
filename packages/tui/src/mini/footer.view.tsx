@@ -118,8 +118,6 @@ type RunFooterViewProps = {
   onExitRequest?: () => boolean
   onRequestExit?: (fn: (() => boolean) | undefined) => void
   onExit: () => void
-  // True SIGTSTP suspend; falls back to onExit when unavailable.
-  onSuspend?: () => void
   onAgentSelect: (agent: string) => void
   onModelSelect: (model: NonNullable<RunInput["model"]>) => void
   onVariantSelect: (variant: string | undefined) => void
@@ -581,12 +579,12 @@ export function RunFooterView(props: RunFooterViewProps) {
     ],
   }))
 
-  // Single-key suspend back to the shell — a true SIGTSTP stop: the process
-  // freezes, the shell repaints instantly, and a later `fg` resumes in
-  // milliseconds. Gated to idle with an empty composer so it never races
-  // the interrupt key during a running turn. Reuses the upstream
-  // "terminal.suspend" action (shared keybind table, default ctrl+z) so it
-  // is rebindable via cli.json like the main TUI's suspend.
+  // "Give me my shell back" — mini has no suspend: hiding means the process
+  // exits cleanly (full tty teardown, no stopped job left in the pane), and
+  // the next summon cold-starts and replays the session from the server.
+  // Gated to idle with an empty composer so it never races the interrupt key
+  // during a running turn. Reuses the upstream "terminal.suspend" action
+  // (shared keybind table, default ctrl+z) so it is rebindable via cli.json.
   Keymap.createLayer(() => ({
     enabled:
       active().type === "prompt" &&
@@ -598,20 +596,21 @@ export function RunFooterView(props: RunFooterViewProps) {
     commands: [
       {
         id: "terminal.suspend",
-        title: "Suspend to shell",
+        title: "Back to shell",
         group: "System",
-        run: () => (props.onSuspend ?? props.onExit)(),
+        run: () => props.onExit(),
       },
     ],
   }))
 
   // ctrl+x hides mini back to the shell — the mirror of the zsh-side summon
-  // key, so the assistant toggles with one key. It suspends (SIGTSTP) rather
-  // than exits: the session stays, and the zsh widget's next ctrl+x fgs the
-  // stopped job back in milliseconds. Only this layer binds "zom.dismiss"
-  // (the shared keybind entry is inert in the main TUI, where ctrl+x stays
-  // the leader), and the same empty-composer gating as suspend keeps it out
-  // of running turns; with text in the composer, ctrl+x still reaches
+  // key, so the assistant toggles with one key. Hiding is a clean exit (see
+  // the terminal.suspend layer above): no stopped process stays behind, the
+  // pane can be closed without a kill confirmation, and any pane's next
+  // ctrl+x summons the same server-side session cold. Only this layer binds
+  // "zom.dismiss" (the shared keybind entry is inert in the main TUI, where
+  // ctrl+x stays the leader), and the same empty-composer gating keeps it
+  // out of running turns; with text in the composer, ctrl+x still reaches
   // prompt.clear and clears the input first.
   Keymap.createLayer(() => ({
     enabled:
@@ -626,7 +625,7 @@ export function RunFooterView(props: RunFooterViewProps) {
         id: "zom.dismiss",
         title: "Hide mini (back to shell)",
         group: "System",
-        run: () => (props.onSuspend ?? props.onExit)?.(),
+        run: () => props.onExit(),
       },
     ],
   }))

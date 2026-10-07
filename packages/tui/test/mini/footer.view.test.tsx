@@ -55,6 +55,11 @@ import { tmpdir } from "../fixture/fixture"
 import { diffImageFixture } from "../fixture/diff-image"
 
 const tuiConfig = createTuiResolvedConfig()
+// The fork binds ctrl+x to "zom.dismiss" (hide mini). In tests that exercise
+// leader chords (ctrl+x q ...) from an empty composer, dismiss would swallow
+// the chord — that shadowing is intended product behavior, covered elsewhere;
+// disable it here so queue tests keep testing the queue.
+const noDismissConfig = createTuiResolvedConfig({ keybinds: { "zom.dismiss": "none" } })
 
 async function nativeLightTheme() {
   await using tmp = await tmpdir()
@@ -1314,6 +1319,7 @@ test("undo appends a pending prompt to the draft", async () => {
     delivery: "queue",
   }
   const app = await renderFooter({
+    tuiConfig: noDismissConfig,
     queuedPrompts: [queued],
     onSubmit: (prompt) => {
       submitted.push(prompt)
@@ -1351,6 +1357,7 @@ test("undo appends a pending prompt to the draft", async () => {
 test("undo leaves the queue and input alone when cancellation fails", async () => {
   const statuses: string[] = []
   const app = await renderFooter({
+    tuiConfig: noDismissConfig,
     queuedPrompts: [{ messageID: "m-1", prompt: { text: "still queued", parts: [] }, delivery: "queue" }],
     onStatus: (status) => statuses.push(status),
     onQueuedPromptAction: async () => {
@@ -1378,6 +1385,7 @@ test("undo leaves the queue and input alone when cancellation fails", async () =
 test("undo retains mentioned files when the prompt is sent again", async () => {
   const submitted: RunPrompt[] = []
   const app = await renderFooter({
+    tuiConfig: noDismissConfig,
     queuedPrompts: [
       {
         messageID: "m-1",
@@ -1427,6 +1435,7 @@ test("undo retains mentioned files when the prompt is sent again", async () => {
 test("direct footer steers the oldest queued prompt from an empty composer", async () => {
   const steered: string[] = []
   const app = await renderFooter({
+    tuiConfig: noDismissConfig,
     queuedPrompts: [
       { messageID: "m-steering", prompt: { text: "already steering", parts: [] }, delivery: "steer" },
       { messageID: "m-1", prompt: { text: "first", parts: [] }, delivery: "queue" },
@@ -1515,6 +1524,7 @@ test("direct footer rejects local commands submitted with the queue shortcut", a
   const submitted: RunPrompt[] = []
   const statuses: string[] = []
   const app = await renderFooter({
+    tuiConfig: noDismissConfig,
     onSubmit: (prompt) => {
       submitted.push(prompt)
       return true
