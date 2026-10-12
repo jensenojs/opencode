@@ -607,17 +607,16 @@ export function RunFooterView(props: RunFooterViewProps) {
   // key, so the assistant toggles with one key. Hiding is a clean exit (see
   // the terminal.suspend layer above): no stopped process stays behind, the
   // pane can be closed without a kill confirmation, and any pane's next
-  // ctrl+x summons the same server-side session cold. Only this layer binds
-  // "zom.dismiss" (the shared keybind entry is inert in the main TUI, where
-  // ctrl+x stays the leader), and the same empty-composer gating keeps it
-  // out of running turns; with text in the composer, ctrl+x still reaches
-  // prompt.clear and clears the input first.
+  // ctrl+x summons the same server-side session cold. Allowed mid-turn too:
+  // the turn runs server-side and keeps streaming while the client is gone.
+  // Only this layer binds "zom.dismiss" (the shared keybind entry is inert
+  // in the main TUI, where ctrl+x stays the leader), and with text in the
+  // composer, ctrl+x still reaches prompt.clear and clears the input first.
   Keymap.createLayer(() => ({
     enabled:
       active().type === "prompt" &&
       route().type === "composer" &&
       !composer.visible() &&
-      !busy() &&
       composer.current().text === "",
     priority: 1,
     commands: [
