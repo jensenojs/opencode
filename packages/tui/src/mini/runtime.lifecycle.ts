@@ -323,7 +323,11 @@ export async function createRuntimeLifecycle(input: LifecycleInput): Promise<Lif
         return
       }
       const printable =
-        event.name.length === 1 && !event.ctrl && !event.meta && !event.option && !event.super && !event.shift
+        (event.name.length === 1 || event.name === "space") &&
+        !event.ctrl &&
+        !event.meta &&
+        !event.option &&
+        !event.super
       if (printable) {
         return
       }
