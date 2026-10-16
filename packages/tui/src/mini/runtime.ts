@@ -58,6 +58,8 @@ type RunRuntimeInput = {
   reconnect?: Reconnect
   files: RunInput["files"]
   initialInput?: string
+  prefill?: string
+  thinking?: boolean
   replay?: boolean
   replayLimit?: number
   demo?: RunInput["demo"]
@@ -77,6 +79,8 @@ export type RunDeferredInput = {
   variant: RunInput["variant"]
   files: RunInput["files"]
   initialInput?: string
+  prefill?: string
+  thinking?: boolean
   replay?: boolean
   replayLimit?: number
   demo?: RunInput["demo"]
@@ -414,6 +418,7 @@ async function runInteractiveRuntime(input: RunRuntimeInput, deps: RunRuntimeDep
   await tuiConfigTask
   const thinking = () => configState.current.thinking === "show"
   const footer = shell.footer
+  if (input.prefill) footer.setPrefill(input.prefill)
   const firstPaint = footer.idle().catch(() => {})
   const offRuntimeClose = footer.onClose(() => {
     state.demo?.interrupt()
@@ -487,7 +492,10 @@ async function runInteractiveRuntime(input: RunRuntimeInput, deps: RunRuntimeDep
         footer.event({ type: "history", history: resumed.history })
         footer.event({ type: "first", first: resumed.first })
         if (footer.isClosed || runtimeController.signal.aborted) return
-        await shell.resetForReplay()
+        // zom: mini is inline by design; a full-screen wipe (2J+3J) on resume
+        // destroys the user's shell context above. Replayed messages render
+        // inline below the prompt instead; they may duplicate what an earlier
+        // run already printed into scrollback — bounded by replayLimit.
       })
       .catch((error) => {
         if (footer.isClosed || runtimeController.signal.aborted) return
@@ -1102,6 +1110,8 @@ export async function runInteractiveDeferredMode(input: RunDeferredInput, deps?:
       directory: input.directory,
       files: input.files,
       initialInput: input.initialInput,
+      prefill: input.prefill,
+      thinking: input.thinking,
       replay: input.replay,
       replayLimit: input.replayLimit,
       demo: input.demo,

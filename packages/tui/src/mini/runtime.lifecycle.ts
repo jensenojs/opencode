@@ -9,11 +9,13 @@
 // Also wires SIGINT so Ctrl-c clears a live prompt draft first, then falls
 // back to the usual two-press exit sequence through RunFooter.requestExit().
 import path from "path"
+import { appendFileSync, readFileSync, statSync, writeFileSync, writeSync } from "fs"
 import {
   CliRenderEvents,
   buildKittyKeyboardFlags,
   createCliRenderer,
   type CliRenderer,
+  type KeyEvent,
   type ScrollbackWriter,
 } from "@opentui/core"
 import { isFallbackTitle } from "@opencode/util/session-title-fallback"
@@ -297,6 +299,121 @@ export async function createRuntimeLifecycle(input: LifecycleInput): Promise<Lif
 
   attachSigint()
 
+  // ctrl+z that reaches the process as a signal (cooked-mode tty VSUSP)
+  // becomes a clean exit, never a stopped process: a stopped mini keeps its
+  // pane hostage (terminal kill confirmation) and its renderer would repaint
+  // at a stale anchor. In raw mode ctrl+z arrives as a key event and is
+  // handled by the keymap layer instead; this handler covers the rest.
+  const onTstpSignal = () => {
+    footer.close()
+  }
+  process.on("SIGTSTP", onTstpSignal)
+
+  // Unclaimed keys (zom fork): a key event that survives the keymap (no
+  // defaultPrevented / propagationStopped) and is not printable composer
+  // input used to be handed to the shell by writing its raw bytes to
+  // ZOM_PASSTHROUGH_FILE and closing mini. That made every unbound key a
+  // trapdoor — with the kitty keyboard protocol enabled, perfectly ordinary
+  // keys arrive as CSI u sequences mini does not bind, and pressing one
+  // killed the composer mid-edit.
+  //
+  // New default: unclaimed keys never close mini. Each one is appended to a
+  // rolling log (ZOM_UNCLAIMED_LOG, default "${ZOM_PASSTHROUGH_FILE}.keys.log"
+  // when the widget sets the passthrough file) with its stroke, source and
+  // raw bytes hex, so a swallowed key is diagnosable after the fact. The log
+  // is capped at ZOM_UNCLAIMED_LOG_CAP bytes (default 64 KiB) by keeping the
+  // newest tail.
+  //
+  // The old exit-and-replay path survives only as an explicit allowlist:
+  // ZOM_PASSTHROUGH_KEYS="ctrl+r,ctrl+q" makes exactly those strokes write
+  // their raw bytes to ZOM_PASSTHROUGH_FILE and close mini, for users who
+  // want a key to take effect in the shell instead.
+  const passthroughFile = process.env.ZOM_PASSTHROUGH_FILE
+  const unclaimedLog = process.env.ZOM_UNCLAIMED_LOG ?? (passthroughFile ? `${passthroughFile}.keys.log` : undefined)
+  const unclaimedLogCap = Number(process.env.ZOM_UNCLAIMED_LOG_CAP ?? 65536) || 65536
+  const passthroughKeys = new Set(
+    (process.env.ZOM_PASSTHROUGH_KEYS ?? "")
+      .split(",")
+      .map((k) => k.trim().toLowerCase())
+      .filter(Boolean),
+  )
+  let detachPassthrough: (() => void) | undefined
+  if (unclaimedLog || (passthroughFile && passthroughKeys.size > 0)) {
+    const strokeOf = (event: KeyEvent) => {
+      const parts: string[] = []
+      if (event.ctrl) parts.push("ctrl")
+      if (event.shift) parts.push("shift")
+      if (event.meta || event.option) parts.push("meta")
+      if (event.super) parts.push("super")
+      if (event.hyper) parts.push("hyper")
+      parts.push(event.name === " " ? "space" : event.name.toLowerCase())
+      return parts.join("+")
+    }
+    const logUnclaimed = (event: KeyEvent, stroke: string) => {
+      if (!unclaimedLog) return
+      const line = JSON.stringify({
+        at: new Date().toISOString(),
+        stroke,
+        source: event.source ?? "unknown",
+        raw: Buffer.from(event.raw ?? "", "binary").toString("hex"),
+      })
+      try {
+        appendFileSync(unclaimedLog, line + "\n")
+        const size = statSync(unclaimedLog).size
+        if (size > unclaimedLogCap) {
+          const keep = readFileSync(unclaimedLog).subarray(-Math.floor(unclaimedLogCap / 2))
+          writeFileSync(unclaimedLog, keep)
+        }
+      } catch {
+        // An unwritable log must never disturb the composer.
+      }
+    }
+    const onPassthroughKey = (event: KeyEvent) => {
+      if (event.defaultPrevented || event.propagationStopped) {
+        return
+      }
+      const printable =
+        (event.name.length === 1 || event.name === "space") &&
+        !event.ctrl &&
+        !event.meta &&
+        !event.option &&
+        !event.super
+      if (printable) {
+        return
+      }
+      // Escape participates in pending-sequence handling and modal dismissal;
+      // with nothing pending it is unclaimed by design. Never log or forward
+      // it — a stray Esc is routine, not a lost key.
+      if (event.name === "escape") {
+        return
+      }
+      // Component useKeyboard handlers (permission dialog enter/arrows, the
+      // command palette, forms) sit on this same keyInput bus but register
+      // later, so their preventDefault() has not run yet when this listener
+      // fires. Decide only after the dispatch settles: a key a dialog claims
+      // must never be treated as unclaimed.
+      const stroke = strokeOf(event)
+      setImmediate(() => {
+        if (event.defaultPrevented || event.propagationStopped) {
+          return
+        }
+        logUnclaimed(event, stroke)
+        if (passthroughFile && passthroughKeys.has(stroke)) {
+          try {
+            appendFileSync(passthroughFile, Buffer.from(event.raw ?? "", "binary"))
+          } catch {
+            // Unwritable passthrough target must not block the exit path.
+          }
+          footer.close()
+        }
+      })
+    }
+    renderer.keyInput.on("keypress", onPassthroughKey)
+    detachPassthrough = () => {
+      renderer.keyInput.off("keypress", onPassthroughKey)
+    }
+  }
+
   const close = async (next: {
     showExit: boolean
     sessionTitle?: string
@@ -309,6 +426,28 @@ export async function createRuntimeLifecycle(input: LifecycleInput): Promise<Lif
 
     closed = true
     detachSigint()
+    detachPassthrough?.()
+    process.off("SIGTSTP", onTstpSignal)
+    // Startup queries the kitty keyboard protocol (CSI ? u); WezTerm treats
+    // the query as protocol detection and starts encoding keys kitty-style
+    // until it sees the pop (CSI < u). opentui never pops — destroy resets
+    // modifyOtherKeys, bracketed paste, and mode 2031 but leaves kitty and
+    // mode 2027 on, so ctrl combos land in the shell as literal "20;5u".
+    // Write the pops in the process exit hook: stdout is back to direct
+    // writes by then, and an empty pop stack is ignored per spec.
+    try {
+      if (process.stdout.isTTY) {
+        process.once("exit", () => {
+          try {
+            writeSync(1, "\x1b[<u\x1b[?2027l")
+          } catch {
+            // Terminal already gone.
+          }
+        })
+      }
+    } catch {
+      // Non-TTY contexts (tests, pipes) need nothing.
+    }
     let wroteExit = false
 
     try {
