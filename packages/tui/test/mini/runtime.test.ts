@@ -27,7 +27,7 @@ function host(): MiniHost {
     stdout: { write() {} },
     files: { readText: async () => "" },
     editor: { open: async () => undefined },
-    paths: { home: "/home/test" },
+    paths: { home: "/home/test", state: "/home/test" },
     signals: {
       sigint: { subscribe: () => () => {} },
       sigusr2: { subscribe: () => () => {} },

@@ -145,7 +145,7 @@ describe("Mini CLI host", () => {
     await using directory = await tmpdir()
     const input = host({ stdin: stream(true), cleanup() {} }, directory.path)
 
-    expect(input.paths).toEqual({ home: directory.path })
+    expect(input.paths).toEqual({ home: directory.path, state: directory.path })
     expect(input.version).toBe(OPENCODE_VERSION)
     expect(input.platform).toBe(process.platform)
     expect(typeof input.files.readText).toBe("function")

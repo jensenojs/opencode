@@ -371,6 +371,10 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
         agent: Flag.String("agent").pipe(Flag.withDescription("Agent to use"), Flag.optional),
         prompt: Flag.String("prompt").pipe(Flag.withDescription("Prompt to use"), Flag.optional),
         demo: Flag.Boolean("demo").pipe(Flag.withDefault(false), Flag.withHidden),
+        prefill: Flag.String("prefill").pipe(
+          Flag.withDescription("Seed the composer with text without sending it"),
+          Flag.optional,
+        ),
       },
     }),
     Spec.make("run", {
