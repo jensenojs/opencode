@@ -909,8 +909,11 @@ export async function createSessionTransport(input: StreamInput): Promise<Sessio
     // Metadata entries (location-switched, idle, model-switched, ...) occupy
     // page slots but never render; overfetch so the requested replay limit
     // still covers real turns even after sessions with many location moves.
+    // The server caps this page size at 200 and answers 400 above it; a
+    // 400 here is retried as a dropped event stream, so an uncapped overfetch
+    // turns into a permanent reconnect loop with no interrupt.
     const page = await client.message.list(
-      { sessionID: input.sessionID, limit: limit * 4 + 20, order: "desc" },
+      { sessionID: input.sessionID, limit: Math.min(limit * 4 + 20, 200), order: "desc" },
       { signal },
     )
     return page.data
