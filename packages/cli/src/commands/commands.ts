@@ -375,6 +375,10 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
           Flag.withDescription("Seed the composer with text without sending it"),
           Flag.optional,
         ),
+        leader: Flag.String("leader").pipe(
+          Flag.withDescription("Leader key for mini keybindings (default: ctrl+x)"),
+          Flag.optional,
+        ),
       },
     }),
     Spec.make("run", {

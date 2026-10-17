@@ -68,6 +68,7 @@ export type LifecycleInput = {
   agent: string | undefined
   model: RunInput["model"]
   variant: string | undefined
+  leader?: string
   tuiConfig: RunTuiConfig | Promise<RunTuiConfig>
   onMiniSettingChange?: (change: MiniSettingChange) => Promise<MiniSettings>
   onPermissionReply: (input: PermissionReply) => void | Promise<void>
@@ -228,6 +229,7 @@ export async function createRuntimeLifecycle(input: LifecycleInput): Promise<Lif
     wrote: true,
     startup,
     tuiConfig,
+    leader: input.leader,
     miniSettings: {
       current: miniSettings,
       update: input.onMiniSettingChange,

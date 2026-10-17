@@ -37,6 +37,7 @@ export default Runtime.handler(Commands.commands.mini, (input) =>
         prefill: Option.getOrUndefined(input.prefill),
         replay: Option.getOrUndefined(input.replay) ?? resolved.mini?.replay ?? true,
         replayLimit: Option.getOrUndefined(input.replayLimit) ?? resolved.mini?.replay_limit,
+        leader: Option.getOrUndefined(input.leader),
         demo: input.demo,
         tuiConfig: resolved,
         config: {

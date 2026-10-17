@@ -28,6 +28,8 @@ import { CliRenderEvents, type CliRenderer, type CliRendererExternalOutputEvent 
 import { render } from "@opentui/solid"
 import { batch, createComponent, createSignal, type Accessor, type Setter } from "solid-js"
 import { createStore, reconcile } from "solid-js/store"
+import { createBindingLookup } from "@opentui/keymap/extras"
+import { TuiKeybind } from "../config/keybind"
 import { Keymap } from "../context/keymap"
 import { Locale } from "../util/locale"
 import { RUN_SUBAGENT_PANEL_ROWS, footerPanelLayout } from "./footer.command"
@@ -65,6 +67,26 @@ import type {
   StreamCommit,
 } from "./types"
 
+// Mini's dismiss key owns ctrl+x, so mini cannot share the main TUI's default
+// leader. Mini keeps its own, overridable from the launcher (--leader).
+export const MINI_LEADER = "ctrl+g"
+
+// The main TUI and mini share one resolved config, so a mini-only leader has to
+// be applied at the keymap provider. Only "leader" is replaced: everything else
+// (including the user's own keybind overrides) stays as configured.
+export function withLeader(config: RunTuiConfig, leader: string = MINI_LEADER): RunTuiConfig {
+  const parsed = TuiKeybind.parse({ leader })
+  const view = createBindingLookup(TuiKeybind.toBindingConfig(parsed), { bindingDefaults: TuiKeybind.bindingDefaults() })
+  return {
+    ...config,
+    keybinds: {
+      ...config.keybinds,
+      get: (command) => (command === "leader" ? view.get("leader") : config.keybinds.get(command)),
+      has: (command) => command === "leader" || config.keybinds.has(command),
+    },
+  }
+}
+
 type CycleResult = {
   modelLabel?: string
   status?: string
@@ -89,6 +111,7 @@ type RunFooterOptions = {
   history?: RunPrompt[]
   theme: RunTheme
   tuiConfig: RunTuiConfig
+  leader?: string
   miniSettings: {
     current: MiniSettings
     update?: (change: MiniSettingChange) => Promise<MiniSettings>
@@ -328,7 +351,7 @@ export class RunFooter implements FooterApi {
     void render(
       () =>
         createComponent(Keymap.Provider, {
-          config: options.tuiConfig,
+          config: withLeader(options.tuiConfig, options.leader ?? MINI_LEADER),
           get children() {
             return createComponent(RunFooterView, {
               directory: options.directory,

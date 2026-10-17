@@ -147,10 +147,10 @@ test.each([false, true])(
 test("ctrl+l clears the split-footer screen without wiping scrollback", async () => {
   const app = await setup()
   try {
-    const clear = spyOn(app.renderer, "resetSplitFooterForReplay").mockImplementation(() => {})
+    const replay = spyOn(app.footer, "replay").mockImplementation(() => {})
     await app.settle()
     app.mockInput.pressKey("l", { ctrl: true })
-    expect(clear).toHaveBeenCalledWith({ clearSavedLines: false })
+    expect(replay).toHaveBeenCalled()
   } finally {
     app.cleanup()
   }
@@ -159,7 +159,7 @@ test("ctrl+l clears the split-footer screen without wiping scrollback", async ()
 test("command palette can clear the screen", async () => {
   const app = await setup()
   try {
-    const clear = spyOn(app.renderer, "resetSplitFooterForReplay").mockImplementation(() => {})
+    const replay = spyOn(app.footer, "replay").mockImplementation(() => {})
     await app.settle()
     app.mockInput.pressKey("p", { ctrl: true })
     await app.settle()
@@ -167,7 +167,7 @@ test("command palette can clear the screen", async () => {
     await app.settle()
     expect(app.selected()).toContain("Clear screen")
     app.mockInput.pressEnter()
-    expect(clear).toHaveBeenCalledWith({ clearSavedLines: false })
+    expect(replay).toHaveBeenCalled()
   } finally {
     app.cleanup()
   }

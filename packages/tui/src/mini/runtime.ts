@@ -63,6 +63,7 @@ type RunRuntimeInput = {
   thinking?: boolean
   replay?: boolean
   replayLimit?: number
+  leader?: string
   demo?: RunInput["demo"]
   tuiConfig?: RunTuiConfig | Promise<RunTuiConfig>
   config?: Pick<Config.Interface, "update">
@@ -84,6 +85,7 @@ export type RunDeferredInput = {
   thinking?: boolean
   replay?: boolean
   replayLimit?: number
+  leader?: string
   demo?: RunInput["demo"]
   tuiConfig?: RunTuiConfig | Promise<RunTuiConfig>
   config?: Pick<Config.Interface, "update">
@@ -1167,6 +1169,7 @@ export async function runInteractiveDeferredMode(input: RunDeferredInput, deps?:
       thinking: input.thinking,
       replay: input.replay,
       replayLimit: input.replayLimit,
+      leader: input.leader,
       demo: input.demo,
       tuiConfig: input.tuiConfig,
       config: input.config,

@@ -21,6 +21,7 @@ export type MiniCommandInput = {
   prefill?: string
   replay?: boolean
   replayLimit?: number
+  leader?: string
   demo?: boolean
   tuiConfig?: MiniFrontendInput["tuiConfig"]
   config?: MiniFrontendInput["config"]
@@ -131,6 +132,7 @@ export async function runMini(input: MiniCommandInput) {
         prefill: input.prefill,
         replay: input.replay ?? true,
         replayLimit: input.replayLimit,
+        leader: input.leader,
         demo: input.demo,
         tuiConfig: input.tuiConfig,
         config: input.config,
