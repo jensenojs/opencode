@@ -287,6 +287,7 @@ export const Definitions = {
   // Bound only by the mini's dismiss layer; in the main TUI no layer
   // registers this id, so ctrl+x keeps working as the leader there.
   "zom.dismiss": keybind("ctrl+x", "Hide mini back to the shell"),
+  "mini.shells": keybind("<leader>s", "Background shells"),
   "terminal.title.toggle": keybind("none", "Toggle terminal title"),
   "plugins.list": keybind("none", "Open plugin manager dialog"),
 

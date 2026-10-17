@@ -299,6 +299,13 @@ export type FooterPromptRoute =
   | { type: "model" }
   | { type: "variant" }
   | { type: "settings" }
+  | { type: "shells" }
+
+export type FooterShellRow = {
+  id: string
+  command: string
+  started: number
+}
 
 export type FooterSubagentTab = {
   sessionID: string

@@ -248,6 +248,15 @@ async function runInteractiveRuntime(input: RunRuntimeInput, deps: RunRuntimeDep
         .catch(() => []),
     agents: [],
     references: [],
+    listShells: async () => {
+      const result = await state.sdk.shell.list({ location: state.location })
+      return result.data
+        .filter((item) => item.status === "running" && item.metadata?.sessionID === state.sessionID)
+        .map((item) => ({ id: item.id, command: item.command, started: item.time.started }))
+    },
+    killShell: async (id) => {
+      await state.sdk.shell.remove({ id, location: state.location })
+    },
     sessionID: state.sessionID,
     sessionTitle: state.sessionTitle,
     getSessionID: () => state.sessionID,

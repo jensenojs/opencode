@@ -19,6 +19,7 @@ import { monoShortcut } from "./mono"
 import type { RunFooterTheme } from "./theme"
 import type {
   FooterQueuedPrompt,
+  FooterShellRow,
   FooterSubagentTab,
   MiniSettingChange,
   MiniSettings,
@@ -932,6 +933,85 @@ export function RunSubagentSelectBody(props: {
         limit={controller.menu.limit()}
         compact={controller.layout().compact}
         empty="No subagents found"
+        border={false}
+        paddingLeft={panelPad(props.mono)}
+        paddingRight={panelPad(props.mono)}
+        grouped={false}
+        background
+        mono={props.mono}
+      />
+    </PanelShell>
+  )
+}
+
+const SHELL_LIST_ROWS = 12
+
+type ShellEntry = PanelEntry & { shellID: string }
+
+function shellAge(started: number) {
+  const seconds = Math.max(0, Math.floor((Date.now() - started) / 1000))
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes}m`
+  return `${Math.floor(minutes / 60)}h${String(minutes % 60).padStart(2, "0")}m`
+}
+
+export function RunShellSelectBody(props: {
+  theme: Accessor<RunFooterTheme>
+  rows: Accessor<FooterShellRow[]>
+  onClose: () => void
+  onKill: (id: string) => void
+  onRows?: (rows: number) => void
+  mono?: boolean
+}) {
+  const entries = createMemo<ShellEntry[]>(() =>
+    props.rows().map((row) => ({
+      category: "",
+      display: row.command.replaceAll("\n", " "),
+      footer: shellAge(row.started),
+      keywords: row.command,
+      shellID: row.id,
+    })),
+  )
+  const controller = createSearchablePanelController({
+    entries,
+    limit: SHELL_LIST_ROWS,
+    onClose: props.onClose,
+    onSelect: (item) => props.onKill(item.shellID),
+    closeOnFirstUp: true,
+    onKey(event, item) {
+      const name = event.name.toLowerCase()
+      if (name !== "x" && !(event.ctrl && name === "d")) return false
+      event.preventDefault()
+      if (item) props.onKill(item.shellID)
+      return true
+    },
+    onRows: props.onRows,
+  })
+
+  return (
+    <PanelShell
+      title="Background shells"
+      layout={controller.layout()}
+      query={controller.query()}
+      count={controller.items().length}
+      total={entries().length}
+      placeholder="Search"
+      theme={props.theme}
+      inputRef={controller.inputRef}
+      onQuery={controller.setQuery}
+      hint="enter or x kill"
+      mono={props.mono}
+    >
+      <RunFooterMenu
+        theme={props.theme}
+        items={controller.items}
+        selected={controller.menu.selected}
+        offset={controller.menu.offset}
+        rows={controller.menu.rows}
+        limit={controller.menu.limit()}
+        compact={controller.layout().compact}
+        empty="No background shells"
         border={false}
         paddingLeft={panelPad(props.mono)}
         paddingRight={panelPad(props.mono)}

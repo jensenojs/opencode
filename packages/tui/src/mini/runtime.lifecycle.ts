@@ -31,6 +31,7 @@ import type {
   MiniHost,
   PermissionReply,
   QueuedPromptAction,
+  FooterShellRow,
   RunAgent,
   RunInput,
   RunPrompt,
@@ -81,6 +82,8 @@ export type LifecycleInput = {
   onInterrupt?: () => void
   onBackground?: () => void
   onQueuedPromptAction?: (action: QueuedPromptAction, inboxID: string) => Promise<void>
+  listShells?: () => Promise<FooterShellRow[]>
+  killShell?: (id: string) => Promise<void>
   onSubagentSelect?: (sessionID: string | undefined) => void
   onSubagentInterrupt?: (sessionID: string) => void
 }
@@ -251,6 +254,8 @@ export async function createRuntimeLifecycle(input: LifecycleInput): Promise<Lif
     onInterrupt: input.onInterrupt,
     onBackground: input.onBackground,
     onQueuedPromptAction: input.onQueuedPromptAction,
+    listShells: input.listShells,
+    killShell: input.killShell,
     onEditorOpen: async ({ value }) => {
       if (closed || renderer.isDestroyed) {
         return

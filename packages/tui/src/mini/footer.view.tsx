@@ -21,6 +21,7 @@ import {
   RunModelSelectBody,
   RunQueuedPromptSelectBody,
   RunSettingsBody,
+  RunShellSelectBody,
   RunSubagentSelectBody,
   RunVariantSelectBody,
 } from "./footer.command"
@@ -61,6 +62,7 @@ import type {
   RunProvider,
   RunReference,
   RunTuiConfig,
+  FooterShellRow,
 } from "./types"
 import type { RunTheme } from "./theme"
 
@@ -117,6 +119,8 @@ type RunFooterViewProps = {
   onInterrupt: () => boolean
   onBackground?: () => void
   onQueuedPromptAction?: (action: QueuedPromptAction, inboxID: string) => Promise<void>
+  listShells?: () => Promise<FooterShellRow[]>
+  killShell?: (id: string) => Promise<void>
   onEditorOpen: (input: { value: string }) => Promise<string | undefined>
   onInputClear: () => void
   onExitRequest?: () => boolean
@@ -165,10 +169,12 @@ export function RunFooterView(props: RunFooterViewProps) {
   const modeling = createMemo(() => active().type === "prompt" && route().type === "model")
   const varianting = createMemo(() => active().type === "prompt" && route().type === "variant")
   const setting = createMemo(() => active().type === "prompt" && route().type === "settings")
+  const shelling = createMemo(() => active().type === "prompt" && route().type === "shells")
   const panel = createMemo(
     () =>
       active().type === "permission" ||
       active().type === "form" ||
+      shelling() ||
       selectingQueued() ||
       selectingSubagent() ||
       commanding() ||
@@ -316,6 +322,29 @@ export function RunFooterView(props: RunFooterViewProps) {
     }
 
     openRoute({ type: "subagent-menu" })
+  }
+
+  const [shellRows, setShellRows] = createSignal<FooterShellRow[]>([])
+
+  const refreshShells = async () => {
+    if (!props.listShells) return
+    setShellRows(await props.listShells().catch(() => []))
+  }
+
+  const openShells = () => {
+    if (!props.listShells) return
+    void refreshShells()
+    openRoute({ type: "shells" })
+  }
+
+  const killShell = (id: string) => {
+    if (!props.killShell) return
+    void props.killShell(id)
+      .catch(() => {})
+      .then(async () => {
+        setShellRows((rows) => rows.filter((row) => row.id !== id))
+        await refreshShells()
+      })
   }
 
   const openQueuedMenu = () => {
@@ -700,6 +729,18 @@ export function RunFooterView(props: RunFooterViewProps) {
   }))
 
   Keymap.createLayer(() => ({
+    enabled: active().type === "prompt" && route().type === "composer" && !!props.listShells,
+    commands: [
+      {
+        id: "mini.shells",
+        title: "Background shells",
+        group: "Session",
+        run: openShells,
+      },
+    ],
+  }))
+
+  Keymap.createLayer(() => ({
     enabled: active().type === "prompt" && route().type === "composer" && queuedPrompts().length > 0,
     commands: [
       {
@@ -778,7 +819,8 @@ export function RunFooterView(props: RunFooterViewProps) {
       current.type !== "variant" &&
       current.type !== "settings" &&
       current.type !== "queued-menu" &&
-      current.type !== "subagent-menu"
+      current.type !== "subagent-menu" &&
+      current.type !== "shells"
     ) {
       return
     }
@@ -873,6 +915,15 @@ export function RunFooterView(props: RunFooterViewProps) {
                             onContentChange={composer.onContentChange}
                             onSizeChange={composer.onSizeChange}
                             bind={composer.bind}
+                          />
+                        </Match>
+                        <Match when={shelling()}>
+                          <RunShellSelectBody
+                            theme={theme}
+                            rows={shellRows}
+                            onClose={closePanel}
+                            onKill={killShell}
+                            mono={props.mono}
                           />
                         </Match>
                         <Match when={selectingSubagent()}>

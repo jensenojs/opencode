@@ -48,6 +48,7 @@ import type {
   FooterPatch,
   FooterPromptRoute,
   FooterQueuedPrompt,
+  FooterShellRow,
   FooterState,
   FooterSubagentState,
   FooterView,
@@ -69,7 +70,7 @@ import type {
 
 // Mini's dismiss key owns ctrl+x, so mini cannot share the main TUI's default
 // leader. Mini keeps its own, overridable from the launcher (--leader).
-export const MINI_LEADER = "ctrl+g"
+export const MINI_LEADER = "ctrl+m"
 
 // The main TUI and mini share one resolved config, so a mini-only leader has to
 // be applied at the keymap provider. Only "leader" is replaced: everything else
@@ -90,6 +91,7 @@ export const MINI_COMMANDS = new Set([
   "background",
   "command.palette.show",
   "composer.subagent.interrupt",
+  "mini.shells",
   "prompt.autocomplete.complete",
   "prompt.autocomplete.hide",
   "prompt.autocomplete.next",
@@ -183,6 +185,8 @@ type RunFooterOptions = {
   onInterrupt?: () => void
   onBackground?: () => void
   onQueuedPromptAction?: (action: QueuedPromptAction, inboxID: string) => Promise<void>
+  listShells?: () => Promise<FooterShellRow[]>
+  killShell?: (id: string) => Promise<void>
   onEditorOpen: (input: { value: string }) => Promise<string | undefined>
   onSubagentSelect?: (sessionID: string | undefined) => void
   onSubagentInterrupt?: (sessionID: string) => void
@@ -464,6 +468,8 @@ export class RunFooter implements FooterApi {
               onLayout: footer.syncLayout,
               onStatus: footer.setStatus,
               onMiniSettingChange: footer.handleMiniSettingChange,
+              listShells: options.listShells,
+              killShell: options.killShell,
               onSubagentSelect: options.onSubagentSelect,
               onSubagentInterrupt: options.onSubagentInterrupt,
             })
@@ -899,7 +905,7 @@ export class RunFooter implements FooterApi {
         ? this.base + PERMISSION_ROWS
         : type === "form"
           ? this.base + FORM_ROWS
-          : ["command", "skill", "agent", "model", "variant", "settings"].includes(route)
+          : ["command", "skill", "agent", "model", "variant", "settings", "shells"].includes(route)
             ? 1 + panel.frame + panel.limit
             : route === "queued-menu" || route === "subagent-menu"
               ? 1 + this.subagentMenuRows
