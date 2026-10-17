@@ -28,6 +28,8 @@ import { CliRenderEvents, type CliRenderer, type CliRendererExternalOutputEvent 
 import { render } from "@opentui/solid"
 import { batch, createComponent, createSignal, type Accessor, type Setter } from "solid-js"
 import { createStore, reconcile } from "solid-js/store"
+import { createBindingLookup } from "@opentui/keymap/extras"
+import { TuiKeybind } from "../config/keybind"
 import { Keymap } from "../context/keymap"
 import { Locale } from "../util/locale"
 import { RUN_SUBAGENT_PANEL_ROWS, footerPanelLayout } from "./footer.command"
@@ -46,6 +48,7 @@ import type {
   FooterPatch,
   FooterPromptRoute,
   FooterQueuedPrompt,
+  FooterShellRow,
   FooterState,
   FooterSubagentState,
   FooterView,
@@ -65,12 +68,91 @@ import type {
   StreamCommit,
 } from "./types"
 
+// Mini's dismiss key owns ctrl+x, so mini cannot share the main TUI's default
+// leader. Mini keeps its own, overridable from the launcher (--leader).
+export const MINI_LEADER = "ctrl+m"
+
+// The main TUI and mini share one resolved config, so a mini-only leader has to
+// be applied at the keymap provider. Only "leader" is replaced: everything else
+// (including the user's own keybind overrides) stays as configured.
+// A leader is only usable if nothing else claims its key: a command bound to
+// the bare leader key consumes the press before any <leader>x combination can
+// match. mini's own dismiss binding (ctrl+x) did exactly that to the main
+// TUI's default leader, which is why mini owns a separate one. Report the
+// collision instead of leaving the user with combinations that silently do
+// nothing.
+//
+// Only mini's own layers matter: the shared keybind table also binds dialogs
+// and screens mini never renders, and those must not count as conflicts.
+// Keep this list in step with the `id:` entries in footer.view.tsx and
+// footer.prompt.tsx.
+export const MINI_COMMANDS = new Set([
+  "app.clear",
+  "background",
+  "command.palette.show",
+  "composer.subagent.interrupt",
+  "mini.shells",
+  "prompt.autocomplete.complete",
+  "prompt.autocomplete.hide",
+  "prompt.autocomplete.next",
+  "prompt.autocomplete.prev",
+  "prompt.autocomplete.select",
+  "prompt.clear",
+  "prompt.editor",
+  "prompt.history.next",
+  "prompt.history.previous",
+  "prompt.paste",
+  "prompt.queue",
+  "queued",
+  "session.background",
+  "session.child.first",
+  "session.interrupt",
+  "session.queued_prompts",
+  "subagents",
+  "terminal.suspend",
+  "variant.cycle",
+  "zom.dismiss",
+])
+
+export function leaderConflicts(config: RunTuiConfig, leader: string): string[] {
+  const normalize = (key: string) =>
+    key
+      .toLowerCase()
+      .replace(/\bcontrol\b/g, "ctrl")
+      .replace(/\s+/g, "")
+  const target = normalize(leader)
+  const conflicts: string[] = []
+  for (const command of MINI_COMMANDS) {
+    for (const binding of config.keybinds.get(command) ?? []) {
+      const key = String(binding.key)
+      if (key.includes("<leader>")) continue
+      if (normalize(key) === target) conflicts.push(command)
+    }
+  }
+  return conflicts
+}
+
+export function withLeader(config: RunTuiConfig, leader: string = MINI_LEADER): RunTuiConfig {
+  const parsed = TuiKeybind.parse({ leader })
+  const view = createBindingLookup(TuiKeybind.toBindingConfig(parsed), { bindingDefaults: TuiKeybind.bindingDefaults() })
+  return {
+    ...config,
+    keybinds: {
+      ...config.keybinds,
+      get: (command) => (command === "leader" ? view.get("leader") : config.keybinds.get(command)),
+      has: (command) => command === "leader" || config.keybinds.has(command),
+    },
+  }
+}
+
 type CycleResult = {
   modelLabel?: string
   status?: string
   variant?: string | undefined
   variants?: string[]
 }
+
+type DraftListener = (draft: RunPrompt, options?: { sync?: boolean }) => void
 
 type RunFooterOptions = {
   directory: () => string
@@ -87,6 +169,7 @@ type RunFooterOptions = {
   history?: RunPrompt[]
   theme: RunTheme
   tuiConfig: RunTuiConfig
+  leader?: string
   miniSettings: {
     current: MiniSettings
     update?: (change: MiniSettingChange) => Promise<MiniSettings>
@@ -102,6 +185,8 @@ type RunFooterOptions = {
   onInterrupt?: () => void
   onBackground?: () => void
   onQueuedPromptAction?: (action: QueuedPromptAction, inboxID: string) => Promise<void>
+  listShells?: () => Promise<FooterShellRow[]>
+  killShell?: (id: string) => Promise<void>
   onEditorOpen: (input: { value: string }) => Promise<string | undefined>
   onSubagentSelect?: (sessionID: string | undefined) => void
   onSubagentInterrupt?: (sessionID: string) => void
@@ -326,7 +411,7 @@ export class RunFooter implements FooterApi {
     void render(
       () =>
         createComponent(Keymap.Provider, {
-          config: options.tuiConfig,
+          config: withLeader(options.tuiConfig, options.leader ?? MINI_LEADER),
           get children() {
             return createComponent(RunFooterView, {
               directory: options.directory,
@@ -352,6 +437,14 @@ export class RunFooter implements FooterApi {
               },
               miniSettings: footer.miniSettings,
               history: footer.history,
+              onPrefillApplied: () => footer.clearPrefill(),
+              get prefill() {
+                return footer.peekPrefill()
+              },
+              prefillPrompt: () => footer.peekPrefillPrompt(),
+              onPrefillPromptApplied: () => footer.clearPrefillPrompt(),
+              onDraftChange: footer.handleDraftChange,
+              onReplay: () => footer.replay(),
               onSubmit: footer.handlePrompt,
               onPermissionReply: footer.handlePermissionReply,
               onFormReply: footer.handleFormReply,
@@ -375,6 +468,8 @@ export class RunFooter implements FooterApi {
               onLayout: footer.syncLayout,
               onStatus: footer.setStatus,
               onMiniSettingChange: footer.handleMiniSettingChange,
+              listShells: options.listShells,
+              killShell: options.killShell,
               onSubagentSelect: options.onSubagentSelect,
               onSubagentInterrupt: options.onSubagentInterrupt,
             })
@@ -388,6 +483,14 @@ export class RunFooter implements FooterApi {
     })
     if (options.startup)
       this.startupTimer = setTimeout(() => this.finishStartup(), (SEED_LAUNCH.frames.length - 1) * SEED_LAUNCH.interval)
+    this.reportLeaderConflicts(options.leader ?? MINI_LEADER)
+  }
+
+  private reportLeaderConflicts(leader: string): void {
+    const conflicts = leaderConflicts(this.options.tuiConfig, leader)
+    if (conflicts.length > 0) {
+      this.setNotice(`leader ${leader} is also bound to ${conflicts.join(", ")}: <leader> keys will not fire`)
+    }
   }
 
   public finishStartup(): void {
@@ -414,6 +517,59 @@ export class RunFooter implements FooterApi {
 
   private get isGone(): boolean {
     return this.destroyed || this.renderer.isDestroyed
+  }
+
+  // Seeded composer text, consumed by the view once the composer applied it.
+  private prefill: string | undefined
+
+  public setPrefill(text: string): void {
+    this.prefill = text
+  }
+
+  public peekPrefill(): string | undefined {
+    return this.prefill
+  }
+
+  public clearPrefill(): void {
+    this.prefill = undefined
+  }
+
+  // 上次退出时留下的草稿，交付方式与上面的 prefill 相同（见 draft.store.ts）。
+  private prefillPromptValue: RunPrompt | undefined
+
+  public setPrefillPrompt(draft: RunPrompt): void {
+    this.prefillPromptValue = draft
+  }
+
+  public peekPrefillPrompt(): RunPrompt | undefined {
+    return this.prefillPromptValue
+  }
+
+  public clearPrefillPrompt(): void {
+    this.prefillPromptValue = undefined
+  }
+
+  private readonly draftListeners = new Set<DraftListener>()
+
+  public onDraftChange(fn: DraftListener): () => void {
+    this.draftListeners.add(fn)
+    return () => {
+      this.draftListeners.delete(fn)
+    }
+  }
+
+  private readonly handleDraftChange = (draft: RunPrompt, options?: { sync?: boolean }) => {
+    for (const fn of this.draftListeners) fn(draft, options)
+  }
+
+  private replayHandler: (() => void) | undefined
+
+  public setReplayHandler(fn: () => void): void {
+    this.replayHandler = fn
+  }
+
+  public replay(): void {
+    this.replayHandler?.()
   }
 
   public onPrompt(fn: (input: RunPrompt) => void): () => void {
@@ -751,7 +907,7 @@ export class RunFooter implements FooterApi {
           ? this.base + FORM_ROWS
           : ["command", "skill", "agent", "model", "variant", "settings"].includes(route)
             ? 1 + panel.frame + panel.limit
-            : route === "queued-menu" || route === "subagent-menu"
+            : route === "queued-menu" || route === "subagent-menu" || route === "shells"
               ? 1 + this.subagentMenuRows
               : route === "subagent"
                 ? this.base + SUBAGENT_INSPECTOR_ROWS

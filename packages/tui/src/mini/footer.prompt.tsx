@@ -135,6 +135,9 @@ type PromptInput = {
   onInterrupt: () => boolean
   onEditorOpen: (input: { value: string }) => Promise<string | undefined>
   onInputClear: () => void
+  // 草稿变化时上报一份快照，供退出后仍能找回（见 draft.store.ts）。
+  // sync 为真表示马上要退出，必须同步落盘。
+  onDraftChange?: (draft: RunPrompt, options?: { sync?: boolean }) => void
   onExitRequest?: () => boolean
   onExit: () => void
   onSettings: () => void
@@ -721,6 +724,7 @@ export function createPromptState(input: PromptInput): PromptState {
     area.cursorOffset = Math.min(cursor, stringWidth(area.plainText))
     scheduleRows()
     area.focus()
+    input.onDraftChange?.(draft)
   }
 
   const resetDraft = () => {
@@ -732,6 +736,7 @@ export function createPromptState(input: PromptInput): PromptState {
     clearParts()
     hide()
     draft = emptyPrompt(shell())
+    input.onDraftChange?.(draft)
     if (!area || area.isDestroyed) {
       return
     }
@@ -857,6 +862,7 @@ export function createPromptState(input: PromptInput): PromptState {
       source: { type: "file", text: { start, end, value } },
     })
     syncDraft()
+    input.onDraftChange?.(draft)
   }
 
   const paste = (text?: string) => {
@@ -1541,6 +1547,7 @@ export function createPromptState(input: PromptInput): PromptState {
       if (!applyingPaste && area && area.plainText !== draft.text) revision += 1
       input.onInputClear()
       syncDraft()
+      input.onDraftChange?.(draft)
       refresh()
       scheduleRows()
     },

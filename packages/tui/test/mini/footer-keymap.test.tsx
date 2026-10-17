@@ -107,7 +107,7 @@ async function openSubagent(app: Awaited<ReturnType<typeof testRender>>) {
   expect(app.renderer.currentFocusedEditor?.plainText).toBe("")
   app.mockInput.pressArrow("down")
   await app.renderOnce()
-  expect(app.captureCharFrame()).toContain("Select subagent")
+  expect(app.captureCharFrame()).toContain("Subagents")
   app.mockInput.pressEnter()
   await app.renderOnce()
 }

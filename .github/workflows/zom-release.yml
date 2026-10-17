@@ -1,0 +1,164 @@
+# zom fork 发版流程（分支 zom-inline-resume）。
+#
+# 两个入口：
+#   1. Actions 页面手动 Run workflow（dispatch）——发版按钮。workflow 自己完成：
+#      感知上游最新 tag → 把 zom patch（分支相对上游共同基点的全部差异）搬运过去
+#      → 在新 commit 上打 zom-vX tag → 推分支和 tag → 构建 → 发 GitHub Release。
+#   2. 手工路径：本地自己搬完运、打好 tag、push zom-v* tag，CI 只负责构建发布。
+#
+# 安装：scripts/install-zom-binary.sh（拉 Release 产物到 ~/.local/bin/opencode-zom）。
+#
+# 为什么 patch 用 squash 搬运而不是逐个 cherry-pick：
+#   上游大版本常把 API 整体改名（如 Flag.string → Flag.String），逐个 rebase 会在
+#   每个调用点撞同类冲突；squash 成一个 diff，冲突只解一次。搬运基点是
+#   merge-base(HEAD, 上游tag)，旧 fork 线遗留的上游 release 提交会被自动甩掉。
+name: zom-release
+
+on:
+  push:
+    tags: ["zom-v*"]
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: "指定上游 tag（留空 = 自动取最新 v*）"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  BRANCH: zom-inline-resume
+  UPSTREAM_REPO: anomalyco/opencode
+
+jobs:
+  # ---------- dispatch 路径：感知上游 + 搬运 + 打 tag + 推送 ----------
+  sync:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    outputs:
+      zom_tag: ${{ steps.tag.outputs.zom_tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BRANCH }}
+          fetch-depth: 0 # 需要完整历史算 merge-base
+
+      - name: 拉上游 tag
+        run: |
+          git remote add upstream "https://github.com/${{ env.UPSTREAM_REPO }}.git"
+          git fetch upstream --tags
+
+      - name: 感知上游最新 tag，判断是否需要搬运
+        id: detect
+        run: |
+          INPUT="${{ inputs.upstream_tag }}"
+          if [ -n "$INPUT" ]; then
+            UP="$INPUT"
+          else
+            UP=$(git tag -l 'v*' | grep -v '^vscode-' | grep -v '^zom-' | sort -V | tail -1)
+          fi
+          [ -n "$UP" ] || { echo "::error::上游没有可用 tag"; exit 1; }
+          BASE=$(git merge-base HEAD "refs/tags/$UP")
+          echo "上游 tag: $UP，当前 patch 基点: $(git rev-parse --short "$BASE")"
+          if [ "$(git rev-parse "$BASE")" = "$(git rev-parse "refs/tags/$UP")" ]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT" # 基点已在 tag 上 → 只补 tag
+          else
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "upstream_tag=$UP" >> "$GITHUB_OUTPUT"
+
+      - name: 搬运 zom patch 到上游最新 tag
+        if: steps.detect.outputs.skip == 'true'
+        run: |
+          UP="refs/tags/${{ steps.detect.outputs.upstream_tag }}"
+          BASE=$(git merge-base HEAD "$UP")
+          git diff "$BASE" HEAD > /tmp/zom.patch
+          git checkout --detach "$UP"
+          if git apply --3way /tmp/zom.patch; then
+            git add -A
+            git commit -m "zom: patch stack rebased onto ${{ steps.detect.outputs.upstream_tag }}"
+          else
+            # 冲突不在 CI 里硬解——本地解，命令都给出
+            echo "::error::搬运冲突，在本地解决后重新 dispatch："
+            cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          本地解冲突步骤：
+          ```sh
+          git fetch upstream --tags
+          git checkout -B zom-inline-resume-tmp <上游tag>
+          git diff $(git merge-base zom-inline-resume <上游tag>) zom-inline-resume > /tmp/zom.patch
+          git apply --3way /tmp/zom.patch   # 解冲突
+          git add -A && git commit -m "zom: patch stack rebased onto <上游tag>"
+          git push origin zom-inline-resume-tmp:zom-inline-resume --force-with-lease
+          git tag zom-<上游tag> && git push origin zom-<上游tag>
+          ```
+          EOF
+            exit 1
+          fi
+
+      - name: 计算 zom tag 并推送分支 + tag
+        id: tag
+        run: |
+          UP="${{ steps.detect.outputs.upstream_tag }}"
+          # 同一上游 tag 重复发版时递增后缀：zom-v2.0.30, zom-v2.0.30.1, ...
+          if git ls-remote --exit-code --tags origin "refs/tags/zom-$UP" >/dev/null 2>&1; then
+            N=$(git ls-remote --tags origin "refs/tags/zom-$UP.*" | wc -l)
+            ZOM_TAG="zom-$UP.$((N + 1))"
+          else
+            ZOM_TAG="zom-$UP"
+          fi
+          git tag "$ZOM_TAG"
+          git push origin "HEAD:$BRANCH" --force-with-lease
+          git push origin "$ZOM_TAG"
+          echo "zom_tag=$ZOM_TAG" >> "$GITHUB_OUTPUT"
+
+  # ---------- 构建（两条路径共用）----------
+  build:
+    needs: sync
+    if: ${{ !cancelled() && (github.event_name == 'push' || needs.sync.result == 'success') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-14, target: darwin-arm64 }
+          - { os: ubuntu-24.04, target: linux-x64 }
+          - { os: ubuntu-24.04-arm, target: linux-arm64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.sync.outputs.zom_tag || github.ref }}
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.2"
+      - name: Install dependencies
+        run: bun install
+      - name: Build single-file binary
+        run: bun run --cwd packages/cli build --single --skip-web-ui --skip-install
+        env:
+          # 钉死数据面 channel：所有 zom 产物共享同一个 sqlite 文件
+          # (opencode-zom.db)。不钉的话 channel 回落到分支名/空值，每种构建来源
+          # 各建一个库，会话历史会碎片化。
+          OPENCODE_CHANNEL: zom
+      - name: Collect binary
+        run: |
+          mkdir -p out
+          cp packages/cli/dist/cli-*/bin/opencode out/opencode-zom-${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: opencode-zom-${{ matrix.target }}
+          path: out/opencode-zom-${{ matrix.target }}
+
+  # ---------- 发 Release（两条路径共用）----------
+  release:
+    needs: [sync, build]
+    if: ${{ !cancelled() && (github.event_name == 'push' || needs.sync.result == 'success') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.sync.outputs.zom_tag || github.ref_name }}
+          files: opencode-zom-*

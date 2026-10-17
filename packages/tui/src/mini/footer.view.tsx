@@ -10,7 +10,7 @@
 /** @jsxImportSource @opentui/solid */
 import { useRenderer, useTerminalDimensions } from "@opentui/solid"
 import { TextBuffer, TextBufferView } from "@opentui/core"
-import { For, Match, Show, Switch, createEffect, createMemo, createSignal, onCleanup } from "solid-js"
+import { For, Match, Show, Switch, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js"
 import { OneCellSpinner } from "../component/one-cell-spinner"
 import { WORK_SPINNERS, SEED_LAUNCH, SEED_MONO } from "../ui/one-cell-motion"
 import { entrySplashLayout } from "./splash"
@@ -21,7 +21,7 @@ import {
   RunModelSelectBody,
   RunQueuedPromptSelectBody,
   RunSettingsBody,
-  RunSubagentSelectBody,
+  RunSessionPickerBody,
   RunVariantSelectBody,
 } from "./footer.command"
 import { FOOTER_MENU_ROWS, RunFooterMenu } from "./footer.menu"
@@ -61,6 +61,7 @@ import type {
   RunProvider,
   RunReference,
   RunTuiConfig,
+  FooterShellRow,
 } from "./types"
 import type { RunTheme } from "./theme"
 
@@ -102,6 +103,12 @@ type RunFooterViewProps = {
   mono: boolean
   miniSettings: () => MiniSettings
   history?: () => RunPrompt[]
+  prefill?: string
+  prefillPrompt?: () => RunPrompt | undefined
+  onPrefillApplied?: () => void
+  onPrefillPromptApplied?: () => void
+  onDraftChange?: (draft: RunPrompt, options?: { sync?: boolean }) => void
+  onReplay?: () => void
   clipboard?: Pick<ClipboardService, "read">
   onSubmit: (input: RunPrompt) => boolean | Promise<boolean>
   onPermissionReply: (input: PermissionReply) => void | Promise<void>
@@ -111,6 +118,8 @@ type RunFooterViewProps = {
   onInterrupt: () => boolean
   onBackground?: () => void
   onQueuedPromptAction?: (action: QueuedPromptAction, inboxID: string) => Promise<void>
+  listShells?: () => Promise<FooterShellRow[]>
+  killShell?: (id: string) => Promise<void>
   onEditorOpen: (input: { value: string }) => Promise<string | undefined>
   onInputClear: () => void
   onExitRequest?: () => boolean
@@ -159,10 +168,12 @@ export function RunFooterView(props: RunFooterViewProps) {
   const modeling = createMemo(() => active().type === "prompt" && route().type === "model")
   const varianting = createMemo(() => active().type === "prompt" && route().type === "variant")
   const setting = createMemo(() => active().type === "prompt" && route().type === "settings")
+  const shelling = createMemo(() => active().type === "prompt" && route().type === "shells")
   const panel = createMemo(
     () =>
       active().type === "permission" ||
       active().type === "form" ||
+      shelling() ||
       selectingQueued() ||
       selectingSubagent() ||
       commanding() ||
@@ -201,6 +212,7 @@ export function RunFooterView(props: RunFooterViewProps) {
   const subagentShortcut = () => shortcut("session.child.first")
   const queuedShortcut = () => shortcut("session.queued_prompts")
   const backgroundShortcut = () => shortcut("session.background")
+  const shellsShortcut = () => shortcut("mini.shells")
   const subagentInterruptShortcut = () => shortcut("composer.subagent.interrupt")
   const interrupt = () => shortcut("session.interrupt")
   const variantCycle = () => monoShortcut(shortcuts.all("variant.cycle") ?? "", props.mono)
@@ -305,11 +317,52 @@ export function RunFooterView(props: RunFooterViewProps) {
   }
 
   const openSubagentMenu = () => {
-    if (tabs().length === 0) {
+    if (tabs().length === 0 && !props.listShells) {
       return
     }
 
+    void refreshShells()
     openRoute({ type: "subagent-menu" })
+  }
+
+  const [shellRows, setShellRows] = createSignal<FooterShellRow[]>([])
+
+  const refreshShells = async () => {
+    if (!props.listShells) return
+    setShellRows(await props.listShells().catch(() => []))
+  }
+
+  // The statusline advertises running shells, so the count has to follow the
+  // server, not just the moments the picker is opened.
+  createEffect(() => {
+    if (!props.listShells) return
+    let running = false
+    const tick = () => {
+      if (running) return
+      running = true
+      void refreshShells().finally(() => {
+        running = false
+      })
+    }
+    tick()
+    const timer = setInterval(tick, 1000)
+    onCleanup(() => clearInterval(timer))
+  })
+
+  const openShells = () => {
+    if (!props.listShells) return
+    void refreshShells()
+    openRoute({ type: "shells" })
+  }
+
+  const killShell = (id: string) => {
+    if (!props.killShell) return
+    void props.killShell(id)
+      .catch(() => {})
+      .then(async () => {
+        setShellRows((rows) => rows.filter((row) => row.id !== id))
+        await refreshShells()
+      })
   }
 
   const openQueuedMenu = () => {
@@ -388,11 +441,42 @@ export function RunFooterView(props: RunFooterViewProps) {
     onInterrupt: props.onInterrupt,
     onEditorOpen: props.onEditorOpen,
     onInputClear: props.onInputClear,
+    onDraftChange: props.onDraftChange,
     onExitRequest: props.onExitRequest,
     onExit: props.onExit,
     onSettings: openSettings,
     onRows: setPromptRows,
     onStatus: props.onStatus,
+  })
+  onMount(() => {
+    // The prefill may be set just before or just after this view mounts
+    // (footer construction order), so poll briefly for it to appear. A saved
+    // draft (see draft.store.ts) arrives through the same door and carries
+    // attachments, so it takes the typed prefill's place when present.
+    let tries = 0
+    const t = setInterval(() => {
+      tries += 1
+      const saved = props.prefillPrompt?.()
+      if (saved) {
+        composer.replacePrompt(saved, stringWidth(saved.text))
+        if (composer.current().text === saved.text) {
+          props.onPrefillPromptApplied?.()
+          clearInterval(t)
+        }
+      } else {
+        const text = props.prefill
+        if (text) {
+          const seed: RunPrompt = { text, parts: [] }
+          composer.replacePrompt(seed, stringWidth(text))
+          if (composer.current().text === text) {
+            props.onPrefillApplied?.()
+            clearInterval(t)
+          }
+        }
+      }
+      if (tries > 100) clearInterval(t)
+    }, 100)
+    onCleanup(() => clearInterval(t))
   })
   const shell = createMemo(() => prompt() && composer.shell())
   const menu = createMemo(() => prompt() && composer.visible())
@@ -453,7 +537,12 @@ export function RunFooterView(props: RunFooterViewProps) {
       return []
     }
 
-    const items: Array<{ id: "queued" | "subagents" | "background"; key: string; label: string; expanded?: string }> =
+    const items: Array<{
+      id: "queued" | "subagents" | "background" | "shells"
+      key: string
+      label: string
+      expanded?: string
+    }> =
       []
     if (queuedPrompts().length > 0 && queuedShortcut()) {
       items.push({ id: "queued", key: queuedShortcut(), label: `${queuedPrompts().length} pending` })
@@ -468,6 +557,13 @@ export function RunFooterView(props: RunFooterViewProps) {
     }
     if (foregroundSubagents() && backgroundShortcut()) {
       items.push({ id: "background", key: backgroundShortcut(), label: "bg", expanded: "background" })
+    }
+    if (shellRows().length > 0 && shellsShortcut()) {
+      items.push({
+        id: "shells",
+        key: shellsShortcut(),
+        label: `${shellRows().length} shell${shellRows().length === 1 ? "" : "s"}`,
+      })
     }
     return items
   })
@@ -538,11 +634,24 @@ export function RunFooterView(props: RunFooterViewProps) {
     props.onRequestExit?.(undefined)
   })
 
+  // 退出前先把草稿交出去：hide 是干净退出（进程真的结束），磁盘上那份是下次
+  // 召唤时找回草稿的唯一来源，所以这一步必须同步落盘。
+  const dismiss = () => {
+    props.onDraftChange?.(composer.current(), { sync: true })
+    props.onExit()
+  }
+
   const clearScreen = () => {
     if (renderer.isDestroyed) return
     if (renderer.screenMode !== "split-footer") return
     if (renderer.externalOutputMode !== "capture-stdout") return
     if (renderer.currentControlState === "explicit_suspended") return
+    // 重灌：连同滚回区里召唤 mini 之前那些 shell 输出一起擦掉，再把会话最近
+    // 若干轮印回来。只擦不重印的话，对话本身也跟着没了。
+    if (props.onReplay) {
+      props.onReplay()
+      return
+    }
     // Home, erase the visible display, keep terminal scrollback, then repaint the footer.
     renderer.resetSplitFooterForReplay({ clearSavedLines: false })
   }
@@ -554,6 +663,54 @@ export function RunFooterView(props: RunFooterViewProps) {
         title: "Clear screen",
         group: "System",
         run: clearScreen,
+      },
+    ],
+  }))
+
+  // "Give me my shell back" — mini has no suspend: hiding means the process
+  // exits cleanly (full tty teardown, no stopped job left in the pane), and
+  // the next summon cold-starts and replays the session from the server.
+  // Reuses the upstream "terminal.suspend" action (shared keybind table,
+  // default ctrl+z) so it is rebindable via cli.json. Deliberately not gated
+  // on idle or on an empty box: a running turn lives server-side and keeps
+  // streaming while the client is gone, and whatever sits in the box is kept
+  // in the draft file — so neither keypress here loses anything.
+  Keymap.createLayer(() => ({
+    enabled: active().type === "prompt" && route().type === "composer" && !composer.visible(),
+    priority: 1,
+    commands: [
+      {
+        id: "terminal.suspend",
+        title: "Back to shell",
+        group: "System",
+        run: dismiss,
+      },
+    ],
+  }))
+
+  // ctrl+x hides mini back to the shell — the mirror of the zsh-side summon
+  // key, so the assistant toggles with one key. Hiding is a clean exit (see
+  // the terminal.suspend layer above): no stopped process stays behind, the
+  // pane can be closed without a kill confirmation, and any pane's next
+  // ctrl+x summons the same server-side session cold. Allowed mid-turn too:
+  // the turn runs server-side and keeps streaming while the client is gone.
+  // Only this layer binds "zom.dismiss" (the shared keybind entry is inert
+  // in the main TUI, where ctrl+x stays the leader). It owns ctrl+x
+  // unconditionally in the plain composer: gating it on an empty box meant a
+  // non-empty box fell through to prompt.clear, whose run() returns false
+  // when there is no exit to request — so the key was swallowed and mini
+  // could not be hidden. What sits in the box survives the hide in the draft
+  // file; clearing the box instead stays on prompt.clear's own key (ctrl+c).
+  Keymap.createLayer(() => ({
+    enabled:
+      active().type === "prompt" && route().type === "composer" && !composer.visible(),
+    priority: 1,
+    commands: [
+      {
+        id: "zom.dismiss",
+        title: "Hide mini (back to shell)",
+        group: "System",
+        run: dismiss,
       },
     ],
   }))
@@ -590,13 +747,25 @@ export function RunFooterView(props: RunFooterViewProps) {
   }))
 
   Keymap.createLayer(() => ({
-    enabled: active().type === "prompt" && route().type === "composer" && tabs().length > 0,
+    enabled: active().type === "prompt" && route().type === "composer" && (tabs().length > 0 || !!props.listShells),
     commands: [
       {
         id: "session.child.first",
-        title: "View subagents",
+        title: "Subagents and background shells",
         group: "Session",
         run: openSubagentMenu,
+      },
+    ],
+  }))
+
+  Keymap.createLayer(() => ({
+    enabled: active().type === "prompt" && route().type === "composer" && !!props.listShells,
+    commands: [
+      {
+        id: "mini.shells",
+        title: "Background shells",
+        group: "Session",
+        run: openShells,
       },
     ],
   }))
@@ -655,7 +824,7 @@ export function RunFooterView(props: RunFooterViewProps) {
       return
     }
 
-    if (tabs().length > 0) {
+    if (tabs().length > 0 || props.listShells) {
       return
     }
 
@@ -680,7 +849,8 @@ export function RunFooterView(props: RunFooterViewProps) {
       current.type !== "variant" &&
       current.type !== "settings" &&
       current.type !== "queued-menu" &&
-      current.type !== "subagent-menu"
+      current.type !== "subagent-menu" &&
+      current.type !== "shells"
     ) {
       return
     }
@@ -777,13 +947,22 @@ export function RunFooterView(props: RunFooterViewProps) {
                             bind={composer.bind}
                           />
                         </Match>
-                        <Match when={selectingSubagent()}>
-                          <RunSubagentSelectBody
+                        <Match when={selectingSubagent() || shelling()}>
+                          <RunSessionPickerBody
                             theme={theme}
+                            tab={() => (route().type === "shells" ? "shells" : "subagents")}
+                            onTab={(next) => {
+                              if (next === "shells") void refreshShells()
+                              openRoute({ type: next === "shells" ? "shells" : "subagent-menu" })
+                            }}
                             tabs={tabs}
                             current={selected}
+                            shells={props.listShells ? shellRows : undefined}
+                            subagentLabel="Subagents"
+                            shellsLabel="Shell"
                             onClose={closePanel}
                             onSelect={openTab}
+                            onKill={killShell}
                             onRows={setSubagentMenuRows}
                             mono={props.mono}
                           />
@@ -856,7 +1035,7 @@ export function RunFooterView(props: RunFooterViewProps) {
                               closePanel()
                               clearScreen()
                             }}
-                            onExit={props.onExit}
+                            onExit={dismiss}
                             clearShortcut={shortcut("app.clear")}
                             mono={props.mono}
                           />

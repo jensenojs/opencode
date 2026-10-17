@@ -22,6 +22,7 @@ import {
   resolveSessionInfo,
 } from "./runtime.boot"
 import { createRuntimeLifecycle } from "./runtime.lifecycle"
+import { createDraftStore } from "./draft.store"
 import { cycleVariant, formatModelLabel, resolveVariant } from "./variant.shared"
 import { verbosityPreset } from "./verbosity"
 import type {
@@ -58,8 +59,11 @@ type RunRuntimeInput = {
   reconnect?: Reconnect
   files: RunInput["files"]
   initialInput?: string
+  prefill?: string
+  thinking?: boolean
   replay?: boolean
   replayLimit?: number
+  leader?: string
   demo?: RunInput["demo"]
   tuiConfig?: RunTuiConfig | Promise<RunTuiConfig>
   config?: Pick<Config.Interface, "update">
@@ -77,8 +81,11 @@ export type RunDeferredInput = {
   variant: RunInput["variant"]
   files: RunInput["files"]
   initialInput?: string
+  prefill?: string
+  thinking?: boolean
   replay?: boolean
   replayLimit?: number
+  leader?: string
   demo?: RunInput["demo"]
   tuiConfig?: RunTuiConfig | Promise<RunTuiConfig>
   config?: Pick<Config.Interface, "update">
@@ -241,6 +248,15 @@ async function runInteractiveRuntime(input: RunRuntimeInput, deps: RunRuntimeDep
         .catch(() => []),
     agents: [],
     references: [],
+    listShells: async () => {
+      const result = await state.sdk.shell.list({ location: state.location })
+      return result.data
+        .filter((item) => item.status === "running" && item.metadata?.sessionID === state.sessionID)
+        .map((item) => ({ id: item.id, command: item.command, started: item.time.started }))
+    },
+    killShell: async (id) => {
+      await state.sdk.shell.remove({ id, location: state.location })
+    },
     sessionID: state.sessionID,
     sessionTitle: state.sessionTitle,
     getSessionID: () => state.sessionID,
@@ -249,6 +265,7 @@ async function runInteractiveRuntime(input: RunRuntimeInput, deps: RunRuntimeDep
     agent: state.agent,
     model: state.model,
     variant: state.activeVariant,
+    leader: input.leader,
     tuiConfig: tuiConfigTask,
     onMiniSettingChange: config
       ? async (change) => {
@@ -411,11 +428,63 @@ async function runInteractiveRuntime(input: RunRuntimeInput, deps: RunRuntimeDep
       })
     },
   })
-  await tuiConfigTask
+  const tuiConfig = await tuiConfigTask
   const thinking = () => configState.current.thinking === "show"
   const footer = shell.footer
+  const draftStore = createDraftStore(input.host.paths.state)
+  if (input.prefill) {
+    footer.setPrefill(input.prefill)
+  } else {
+    // 上次退出时留在磁盘上的草稿；视图那边会轮询等它出现。
+    void draftStore
+      .load()
+      .then((draft) => {
+        if (draft && !footer.isClosed) footer.setPrefillPrompt(draft)
+      })
+      .catch(() => {})
+  }
+
+  let draftTimer: ReturnType<typeof setTimeout> | undefined
+  let pendingDraft: RunPrompt | undefined
+  const flushDraft = () => {
+    if (draftTimer) clearTimeout(draftTimer)
+    draftTimer = undefined
+    const draft = pendingDraft
+    pendingDraft = undefined
+    if (draft) draftStore.saveSync(draft)
+  }
+  footer.onDraftChange((draft, options) => {
+    pendingDraft = draft
+    if (options?.sync) {
+      flushDraft()
+      return
+    }
+    if (draftTimer) clearTimeout(draftTimer)
+    draftTimer = setTimeout(() => {
+      draftTimer = undefined
+      const item = pendingDraft
+      pendingDraft = undefined
+      if (item) void draftStore.save(item)
+    }, 400)
+  })
+
+  // ctrl+l：擦掉整屏（含召唤 mini 之前那些 shell 输出）后重灌会话最近若干轮。
+  // 与会话 resize 走同一条重灌路径，重印条数同样受 --replay-limit 限制。
+  footer.setReplayHandler(() => {
+    if (!input.replay || !state.stream) return
+    void state.stream
+      .then((item) =>
+        item.handle.replayOnResize({
+          localRows: () => state.localRows,
+          reset: () => shell.resetForReplay(false),
+        }),
+      )
+      .catch(() => {})
+  })
+
   const firstPaint = footer.idle().catch(() => {})
   const offRuntimeClose = footer.onClose(() => {
+    flushDraft()
     state.demo?.interrupt()
     runtimeController.abort()
   })
@@ -487,7 +556,10 @@ async function runInteractiveRuntime(input: RunRuntimeInput, deps: RunRuntimeDep
         footer.event({ type: "history", history: resumed.history })
         footer.event({ type: "first", first: resumed.first })
         if (footer.isClosed || runtimeController.signal.aborted) return
-        await shell.resetForReplay()
+        // zom: mini is inline by design; a full-screen wipe (2J+3J) on resume
+        // destroys the user's shell context above. Replayed messages render
+        // inline below the prompt instead; they may duplicate what an earlier
+        // run already printed into scrollback — bounded by replayLimit.
       })
       .catch((error) => {
         if (footer.isClosed || runtimeController.signal.aborted) return
@@ -800,6 +872,7 @@ async function runInteractiveRuntime(input: RunRuntimeInput, deps: RunRuntimeDep
         sessionID: state.sessionID,
         thinking: thinking(),
         tools: configState.current.tools === "show",
+        permissions: tuiConfig.session.permissions,
         replay: input.replay,
         replayLimit: input.replayLimit,
         footer,
@@ -1102,8 +1175,11 @@ export async function runInteractiveDeferredMode(input: RunDeferredInput, deps?:
       directory: input.directory,
       files: input.files,
       initialInput: input.initialInput,
+      prefill: input.prefill,
+      thinking: input.thinking,
       replay: input.replay,
       replayLimit: input.replayLimit,
+      leader: input.leader,
       demo: input.demo,
       tuiConfig: input.tuiConfig,
       config: input.config,

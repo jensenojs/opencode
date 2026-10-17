@@ -2,7 +2,7 @@
 import { TextAttributes, type InputRenderable, type KeyEvent } from "@opentui/core"
 import { useKeyboard, useRenderer, useTerminalDimensions, type JSX } from "@opentui/solid"
 import fuzzysort from "fuzzysort"
-import { createEffect, createMemo, createSignal, type Accessor } from "solid-js"
+import { createEffect, createMemo, createSignal, For, Show, type Accessor } from "solid-js"
 import { Keymap } from "../context/keymap"
 import { Config } from "../config"
 import { OneCellSpinner } from "../component/one-cell-spinner"
@@ -19,6 +19,7 @@ import { monoShortcut } from "./mono"
 import type { RunFooterTheme } from "./theme"
 import type {
   FooterQueuedPrompt,
+  FooterShellRow,
   FooterSubagentTab,
   MiniSettingChange,
   MiniSettings,
@@ -261,6 +262,10 @@ function createSearchablePanelController<T extends PanelEntry>(input: {
   return {
     query,
     setQuery,
+    clear() {
+      setQuery("")
+      field?.setText("")
+    },
     items,
     menu,
     layout,
@@ -270,8 +275,11 @@ function createSearchablePanelController<T extends PanelEntry>(input: {
   }
 }
 
+type PanelTab = { label: string; active: boolean }
+
 function PanelShell(props: {
   title: string
+  tabs?: PanelTab[]
   countVisible?: boolean
   query: string
   count: number
@@ -290,12 +298,13 @@ function PanelShell(props: {
   const pad = () => (term().width < FOOTER_COMPACT_WIDTH ? 1 : panelPad(props.mono))
   const header = createMemo(() => {
     const width = Math.max(0, term().width - pad() * 2 - 4)
-    const title = footerMenuText(props.title, width, props.mono)
+    const label = props.tabs?.length ? props.tabs.map((tab) => tab.label).join("  ") : props.title
+    const title = footerMenuText(label, width, props.mono)
     const count = countLabel(props.count, props.total, props.query)
-    const showCount = props.countVisible !== false && stringWidth(props.title) + stringWidth(count) + 1 <= width
+    const showCount = props.countVisible !== false && stringWidth(label) + stringWidth(count) + 1 <= width
     const hint =
       props.hint &&
-      stringWidth(props.title) + (showCount ? stringWidth(count) + 1 : 0) + stringWidth(props.hint) + 3 <= width
+      stringWidth(label) + (showCount ? stringWidth(count) + 1 : 0) + stringWidth(props.hint) + 3 <= width
     return { title, count: showCount ? count : undefined, hint: hint ? props.hint : undefined }
   })
   const background = () => (props.background === false ? "transparent" : props.theme().shade)
@@ -313,8 +322,23 @@ function PanelShell(props: {
         backgroundColor={background()}
       >
         <text fg={props.theme().text} attributes={TextAttributes.BOLD} wrapMode="none" flexShrink={0}>
-          {header().title}
+          {props.tabs?.length ? "" : header().title}
         </text>
+        <Show when={props.tabs?.length}>
+          <For each={props.tabs}>
+            {(tab) => (
+              <box paddingRight={2} flexShrink={0}>
+                <text
+                  fg={tab.active ? props.theme().text : props.theme().muted}
+                  attributes={tab.active ? TextAttributes.BOLD : undefined}
+                  wrapMode="none"
+                >
+                  {tab.label}
+                </text>
+              </box>
+            )}
+          </For>
+        </Show>
         {header().count ? (
           <text fg={props.theme().muted} wrapMode="none" flexShrink={0}>
             {" " + header().count}
@@ -860,20 +884,48 @@ export function RunSettingsBody(props: {
   )
 }
 
-export function RunSubagentSelectBody(props: {
+export type SessionPickerTab = "subagents" | "shells"
+
+const SHELL_LIST_ROWS = 12
+
+type ShellEntry = PanelEntry & { shellID: string }
+
+function shellAge(started: number) {
+  const seconds = Math.max(0, Math.floor((Date.now() - started) / 1000))
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes}m`
+  return `${Math.floor(minutes / 60)}h${String(minutes % 60).padStart(2, "0")}m`
+}
+
+/**
+ * One picker for both the subagent list and the background shells it shares a
+ * panel with: the down-arrow entry and the shells shortcut open the same body
+ * and only differ in which tab starts active, so the two lists never drift
+ * apart in chrome or keys.
+ */
+export function RunSessionPickerBody(props: {
   theme: Accessor<RunFooterTheme>
+  tab: Accessor<SessionPickerTab>
+  onTab: (tab: SessionPickerTab) => void
   tabs: Accessor<FooterSubagentTab[]>
   current: Accessor<string | undefined>
+  shells?: Accessor<FooterShellRow[]>
+  subagentLabel: string
+  shellsLabel: string
   onClose: () => void
   onSelect: (sessionID: string) => void
+  onKill: (id: string) => void
   onRows?: (rows: number) => void
   mono?: boolean
 }) {
-  const [active, setActive] = createSignal(true)
-  const entries = createMemo<SubagentEntry[]>(() =>
+  const [inactive, setInactive] = createSignal(false)
+  const order = createMemo<SessionPickerTab[]>(() => (props.shells ? ["subagents", "shells"] : ["subagents"]))
+  const tab = createMemo<SessionPickerTab>(() => (order().includes(props.tab()) ? props.tab() : "subagents"))
+  const subagents = createMemo<SubagentEntry[]>(() =>
     props
       .tabs()
-      .filter((item) => (active() ? item.status === "running" : item.status !== "running"))
+      .filter((item) => (inactive() ? item.status !== "running" : item.status === "running"))
       .map((item) => {
         const title = item.description || item.title || item.label
         return {
@@ -893,25 +945,68 @@ export function RunSubagentSelectBody(props: {
         }
       }),
   )
+  const shells = createMemo<ShellEntry[]>(() =>
+    (props.shells?.() ?? []).map((row) => ({
+      category: "",
+      display: row.command.replaceAll("\n", " "),
+      footer: shellAge(row.started),
+      keywords: row.command,
+      shellID: row.id,
+    })),
+  )
+  const entries = createMemo<Array<SubagentEntry | ShellEntry>>(() => (tab() === "shells" ? shells() : subagents()))
   const controller = createSearchablePanelController({
     entries,
-    limit: SUBAGENT_LIST_ROWS,
+    limit: tab() === "shells" ? SHELL_LIST_ROWS : SUBAGENT_LIST_ROWS,
     onClose: props.onClose,
-    onSelect: (item) => props.onSelect(item.sessionID),
-    isCurrent: (item) => item.current,
+    onSelect: (item) => {
+      if ("shellID" in item) {
+        props.onKill(item.shellID)
+        return
+      }
+      if ("sessionID" in item) props.onSelect(item.sessionID)
+    },
+    isCurrent: (item) => "current" in item && item.current === true,
     closeOnFirstUp: true,
-    onKey(event) {
-      if (event.name.toLowerCase() !== "tab") return false
+    onKey(event, item) {
+      const name = event.name.toLowerCase()
+      if (order().length > 1 && !controller.query().trim() && (name === "left" || name === "right")) {
+        event.preventDefault()
+        const list = order()
+        const index = list.indexOf(tab()) + (name === "right" ? 1 : -1)
+        props.onTab(list[(index + list.length) % list.length]!)
+        controller.clear()
+        return true
+      }
+
+      if (tab() === "shells") {
+        // `x` doubles as a filter character, so it only kills while the search box is empty.
+        const kill = name === "x" && !controller.query().trim()
+        if (!kill && !(event.ctrl && name === "d")) return false
+        event.preventDefault()
+        if (item && "shellID" in item) props.onKill(item.shellID)
+        return true
+      }
+
+      if (name !== "tab") return false
       event.preventDefault()
-      setActive((value) => !value)
+      setInactive((value) => !value)
       return true
     },
     onRows: props.onRows,
   })
 
+  const tabLabels = createMemo(() =>
+    order().map((id) => ({
+      label: id === "shells" ? props.shellsLabel : props.subagentLabel,
+      active: tab() === id,
+    })),
+  )
+
   return (
     <PanelShell
-      title="Select subagent"
+      title={props.subagentLabel}
+      tabs={tabLabels()}
       layout={controller.layout()}
       query={controller.query()}
       count={controller.items().length}
@@ -920,7 +1015,13 @@ export function RunSubagentSelectBody(props: {
       theme={props.theme}
       inputRef={controller.inputRef}
       onQuery={controller.setQuery}
-      hint={`tab show ${active() ? "inactive" : "active"}`}
+      hint={
+        tab() === "shells"
+          ? "enter or x kill"
+          : order().length > 1
+            ? `\u2190/\u2192 tabs ${props.mono ? "-" : "\u00b7"} tab show ${inactive() ? "active" : "inactive"}`
+            : `tab show ${inactive() ? "active" : "inactive"}`
+      }
       mono={props.mono}
     >
       <RunFooterMenu
@@ -931,7 +1032,7 @@ export function RunSubagentSelectBody(props: {
         rows={controller.menu.rows}
         limit={controller.menu.limit()}
         compact={controller.layout().compact}
-        empty="No subagents found"
+        empty={tab() === "shells" ? "No background shells" : "No subagents found"}
         border={false}
         paddingLeft={panelPad(props.mono)}
         paddingRight={panelPad(props.mono)}
