@@ -74,6 +74,62 @@ export const MINI_LEADER = "ctrl+g"
 // The main TUI and mini share one resolved config, so a mini-only leader has to
 // be applied at the keymap provider. Only "leader" is replaced: everything else
 // (including the user's own keybind overrides) stays as configured.
+// A leader is only usable if nothing else claims its key: a command bound to
+// the bare leader key consumes the press before any <leader>x combination can
+// match. mini's own dismiss binding (ctrl+x) did exactly that to the main
+// TUI's default leader, which is why mini owns a separate one. Report the
+// collision instead of leaving the user with combinations that silently do
+// nothing.
+//
+// Only mini's own layers matter: the shared keybind table also binds dialogs
+// and screens mini never renders, and those must not count as conflicts.
+// Keep this list in step with the `id:` entries in footer.view.tsx and
+// footer.prompt.tsx.
+export const MINI_COMMANDS = new Set([
+  "app.clear",
+  "background",
+  "command.palette.show",
+  "composer.subagent.interrupt",
+  "prompt.autocomplete.complete",
+  "prompt.autocomplete.hide",
+  "prompt.autocomplete.next",
+  "prompt.autocomplete.prev",
+  "prompt.autocomplete.select",
+  "prompt.clear",
+  "prompt.editor",
+  "prompt.history.next",
+  "prompt.history.previous",
+  "prompt.paste",
+  "prompt.queue",
+  "queued",
+  "session.background",
+  "session.child.first",
+  "session.interrupt",
+  "session.queued_prompts",
+  "subagents",
+  "terminal.suspend",
+  "variant.cycle",
+  "zom.dismiss",
+])
+
+export function leaderConflicts(config: RunTuiConfig, leader: string): string[] {
+  const normalize = (key: string) =>
+    key
+      .toLowerCase()
+      .replace(/\bcontrol\b/g, "ctrl")
+      .replace(/\s+/g, "")
+  const target = normalize(leader)
+  const conflicts: string[] = []
+  for (const command of MINI_COMMANDS) {
+    for (const binding of config.keybinds.get(command) ?? []) {
+      const key = String(binding.key)
+      if (key.includes("<leader>")) continue
+      if (normalize(key) === target) conflicts.push(command)
+    }
+  }
+  return conflicts
+}
+
 export function withLeader(config: RunTuiConfig, leader: string = MINI_LEADER): RunTuiConfig {
   const parsed = TuiKeybind.parse({ leader })
   const view = createBindingLookup(TuiKeybind.toBindingConfig(parsed), { bindingDefaults: TuiKeybind.bindingDefaults() })
@@ -421,6 +477,14 @@ export class RunFooter implements FooterApi {
     })
     if (options.startup)
       this.startupTimer = setTimeout(() => this.finishStartup(), (SEED_LAUNCH.frames.length - 1) * SEED_LAUNCH.interval)
+    this.reportLeaderConflicts(options.leader ?? MINI_LEADER)
+  }
+
+  private reportLeaderConflicts(leader: string): void {
+    const conflicts = leaderConflicts(this.options.tuiConfig, leader)
+    if (conflicts.length > 0) {
+      this.setNotice(`leader ${leader} is also bound to ${conflicts.join(", ")}: <leader> keys will not fire`)
+    }
   }
 
   public finishStartup(): void {
