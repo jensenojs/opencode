@@ -72,6 +72,8 @@ type CycleResult = {
   variants?: string[]
 }
 
+type DraftListener = (draft: RunPrompt, options?: { sync?: boolean }) => void
+
 type RunFooterOptions = {
   directory: () => string
   findFiles: (query: string) => Promise<string[]>
@@ -352,6 +354,14 @@ export class RunFooter implements FooterApi {
               },
               miniSettings: footer.miniSettings,
               history: footer.history,
+              onPrefillApplied: () => footer.clearPrefill(),
+              get prefill() {
+                return footer.peekPrefill()
+              },
+              prefillPrompt: () => footer.peekPrefillPrompt(),
+              onPrefillPromptApplied: () => footer.clearPrefillPrompt(),
+              onDraftChange: footer.handleDraftChange,
+              onReplay: () => footer.replay(),
               onSubmit: footer.handlePrompt,
               onPermissionReply: footer.handlePermissionReply,
               onFormReply: footer.handleFormReply,
@@ -414,6 +424,59 @@ export class RunFooter implements FooterApi {
 
   private get isGone(): boolean {
     return this.destroyed || this.renderer.isDestroyed
+  }
+
+  // Seeded composer text, consumed by the view once the composer applied it.
+  private prefill: string | undefined
+
+  public setPrefill(text: string): void {
+    this.prefill = text
+  }
+
+  public peekPrefill(): string | undefined {
+    return this.prefill
+  }
+
+  public clearPrefill(): void {
+    this.prefill = undefined
+  }
+
+  // 上次退出时留下的草稿，交付方式与上面的 prefill 相同（见 draft.store.ts）。
+  private prefillPromptValue: RunPrompt | undefined
+
+  public setPrefillPrompt(draft: RunPrompt): void {
+    this.prefillPromptValue = draft
+  }
+
+  public peekPrefillPrompt(): RunPrompt | undefined {
+    return this.prefillPromptValue
+  }
+
+  public clearPrefillPrompt(): void {
+    this.prefillPromptValue = undefined
+  }
+
+  private readonly draftListeners = new Set<DraftListener>()
+
+  public onDraftChange(fn: DraftListener): () => void {
+    this.draftListeners.add(fn)
+    return () => {
+      this.draftListeners.delete(fn)
+    }
+  }
+
+  private readonly handleDraftChange = (draft: RunPrompt, options?: { sync?: boolean }) => {
+    for (const fn of this.draftListeners) fn(draft, options)
+  }
+
+  private replayHandler: (() => void) | undefined
+
+  public setReplayHandler(fn: () => void): void {
+    this.replayHandler = fn
+  }
+
+  public replay(): void {
+    this.replayHandler?.()
   }
 
   public onPrompt(fn: (input: RunPrompt) => void): () => void {

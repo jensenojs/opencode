@@ -10,7 +10,7 @@
 /** @jsxImportSource @opentui/solid */
 import { useRenderer, useTerminalDimensions } from "@opentui/solid"
 import { TextBuffer, TextBufferView } from "@opentui/core"
-import { For, Match, Show, Switch, createEffect, createMemo, createSignal, onCleanup } from "solid-js"
+import { For, Match, Show, Switch, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js"
 import { OneCellSpinner } from "../component/one-cell-spinner"
 import { WORK_SPINNERS, SEED_LAUNCH, SEED_MONO } from "../ui/one-cell-motion"
 import { entrySplashLayout } from "./splash"
@@ -102,6 +102,12 @@ type RunFooterViewProps = {
   mono: boolean
   miniSettings: () => MiniSettings
   history?: () => RunPrompt[]
+  prefill?: string
+  prefillPrompt?: () => RunPrompt | undefined
+  onPrefillApplied?: () => void
+  onPrefillPromptApplied?: () => void
+  onDraftChange?: (draft: RunPrompt, options?: { sync?: boolean }) => void
+  onReplay?: () => void
   clipboard?: Pick<ClipboardService, "read">
   onSubmit: (input: RunPrompt) => boolean | Promise<boolean>
   onPermissionReply: (input: PermissionReply) => void | Promise<void>
@@ -388,11 +394,42 @@ export function RunFooterView(props: RunFooterViewProps) {
     onInterrupt: props.onInterrupt,
     onEditorOpen: props.onEditorOpen,
     onInputClear: props.onInputClear,
+    onDraftChange: props.onDraftChange,
     onExitRequest: props.onExitRequest,
     onExit: props.onExit,
     onSettings: openSettings,
     onRows: setPromptRows,
     onStatus: props.onStatus,
+  })
+  onMount(() => {
+    // The prefill may be set just before or just after this view mounts
+    // (footer construction order), so poll briefly for it to appear. A saved
+    // draft (see draft.store.ts) arrives through the same door and carries
+    // attachments, so it takes the typed prefill's place when present.
+    let tries = 0
+    const t = setInterval(() => {
+      tries += 1
+      const saved = props.prefillPrompt?.()
+      if (saved) {
+        composer.replacePrompt(saved, stringWidth(saved.text))
+        if (composer.current().text === saved.text) {
+          props.onPrefillPromptApplied?.()
+          clearInterval(t)
+        }
+      } else {
+        const text = props.prefill
+        if (text) {
+          const seed: RunPrompt = { text, parts: [] }
+          composer.replacePrompt(seed, stringWidth(text))
+          if (composer.current().text === text) {
+            props.onPrefillApplied?.()
+            clearInterval(t)
+          }
+        }
+      }
+      if (tries > 100) clearInterval(t)
+    }, 100)
+    onCleanup(() => clearInterval(t))
   })
   const shell = createMemo(() => prompt() && composer.shell())
   const menu = createMemo(() => prompt() && composer.visible())
@@ -538,11 +575,24 @@ export function RunFooterView(props: RunFooterViewProps) {
     props.onRequestExit?.(undefined)
   })
 
+  // 退出前先把草稿交出去：hide 是干净退出（进程真的结束），磁盘上那份是下次
+  // 召唤时找回草稿的唯一来源，所以这一步必须同步落盘。
+  const dismiss = () => {
+    props.onDraftChange?.(composer.current(), { sync: true })
+    props.onExit()
+  }
+
   const clearScreen = () => {
     if (renderer.isDestroyed) return
     if (renderer.screenMode !== "split-footer") return
     if (renderer.externalOutputMode !== "capture-stdout") return
     if (renderer.currentControlState === "explicit_suspended") return
+    // 重灌：连同滚回区里召唤 mini 之前那些 shell 输出一起擦掉，再把会话最近
+    // 若干轮印回来。只擦不重印的话，对话本身也跟着没了。
+    if (props.onReplay) {
+      props.onReplay()
+      return
+    }
     // Home, erase the visible display, keep terminal scrollback, then repaint the footer.
     renderer.resetSplitFooterForReplay({ clearSavedLines: false })
   }
@@ -554,6 +604,54 @@ export function RunFooterView(props: RunFooterViewProps) {
         title: "Clear screen",
         group: "System",
         run: clearScreen,
+      },
+    ],
+  }))
+
+  // "Give me my shell back" — mini has no suspend: hiding means the process
+  // exits cleanly (full tty teardown, no stopped job left in the pane), and
+  // the next summon cold-starts and replays the session from the server.
+  // Reuses the upstream "terminal.suspend" action (shared keybind table,
+  // default ctrl+z) so it is rebindable via cli.json. Deliberately not gated
+  // on idle or on an empty box: a running turn lives server-side and keeps
+  // streaming while the client is gone, and whatever sits in the box is kept
+  // in the draft file — so neither keypress here loses anything.
+  Keymap.createLayer(() => ({
+    enabled: active().type === "prompt" && route().type === "composer" && !composer.visible(),
+    priority: 1,
+    commands: [
+      {
+        id: "terminal.suspend",
+        title: "Back to shell",
+        group: "System",
+        run: dismiss,
+      },
+    ],
+  }))
+
+  // ctrl+x hides mini back to the shell — the mirror of the zsh-side summon
+  // key, so the assistant toggles with one key. Hiding is a clean exit (see
+  // the terminal.suspend layer above): no stopped process stays behind, the
+  // pane can be closed without a kill confirmation, and any pane's next
+  // ctrl+x summons the same server-side session cold. Allowed mid-turn too:
+  // the turn runs server-side and keeps streaming while the client is gone.
+  // Only this layer binds "zom.dismiss" (the shared keybind entry is inert
+  // in the main TUI, where ctrl+x stays the leader). It owns ctrl+x
+  // unconditionally in the plain composer: gating it on an empty box meant a
+  // non-empty box fell through to prompt.clear, whose run() returns false
+  // when there is no exit to request — so the key was swallowed and mini
+  // could not be hidden. What sits in the box survives the hide in the draft
+  // file; clearing the box instead stays on prompt.clear's own key (ctrl+c).
+  Keymap.createLayer(() => ({
+    enabled:
+      active().type === "prompt" && route().type === "composer" && !composer.visible(),
+    priority: 1,
+    commands: [
+      {
+        id: "zom.dismiss",
+        title: "Hide mini (back to shell)",
+        group: "System",
+        run: dismiss,
       },
     ],
   }))
@@ -856,7 +954,7 @@ export function RunFooterView(props: RunFooterViewProps) {
                               closePanel()
                               clearScreen()
                             }}
-                            onExit={props.onExit}
+                            onExit={dismiss}
                             clearShortcut={shortcut("app.clear")}
                             mono={props.mono}
                           />

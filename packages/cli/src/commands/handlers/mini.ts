@@ -34,6 +34,7 @@ export default Runtime.handler(Commands.commands.mini, (input) =>
         model: Option.getOrUndefined(input.model),
         agent: Option.getOrUndefined(input.agent),
         prompt: Option.getOrUndefined(input.prompt),
+        prefill: Option.getOrUndefined(input.prefill),
         replay: Option.getOrUndefined(input.replay) ?? resolved.mini?.replay ?? true,
         replayLimit: Option.getOrUndefined(input.replayLimit) ?? resolved.mini?.replay_limit,
         demo: input.demo,
