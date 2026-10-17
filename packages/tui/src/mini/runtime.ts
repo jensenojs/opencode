@@ -256,6 +256,7 @@ async function runInteractiveRuntime(input: RunRuntimeInput, deps: RunRuntimeDep
     agent: state.agent,
     model: state.model,
     variant: state.activeVariant,
+    leader: input.leader,
     tuiConfig: tuiConfigTask,
     onMiniSettingChange: config
       ? async (change) => {

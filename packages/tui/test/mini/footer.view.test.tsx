@@ -151,6 +151,7 @@ function footerState(input: Partial<FooterState> = {}) {
 async function renderFooter(
   input: {
     tuiConfig?: RunTuiConfig
+    leader?: string
     commands?: RunCommand[]
     theme?: () => RunTheme
     providers?: RunProvider[]
@@ -182,7 +183,10 @@ async function renderFooter(
   )
   const [state, setState] = footerState(input.state)
   const [queuedPrompts, setQueuedPrompts] = createSignal(input.queuedPrompts ?? [])
-  const config = withLeader({ ...(input.tuiConfig ?? tuiConfig), animations: input.tuiConfig?.animations ?? false })
+  const config = withLeader(
+    { ...(input.tuiConfig ?? tuiConfig), animations: input.tuiConfig?.animations ?? false },
+    input.leader,
+  )
   const [miniSettings, setMiniSettings] = createSignal<MiniSettings>(input.miniSettings ?? resolveMiniSettings())
   function Harness() {
     return (
@@ -1302,6 +1306,27 @@ test.each(["queue", "steer"] as const)("direct footer toggles and deletes pendin
     expect(actions.at(-1)).toBe("cancel:m-1")
     expect(app.captureCharFrame()).not.toContain("Pending prompts")
     expect(app.captureCharFrame()).not.toContain("1 pending")
+  } finally {
+    app.cleanup()
+  }
+})
+
+test("a custom leader key arms the mini leader chords", async () => {
+  const app = await renderFooter({
+    height: RUN_SUBAGENT_PANEL_ROWS,
+    leader: "ctrl+m",
+    state: { phase: "running" },
+    queuedPrompts: [{ messageID: "m-1", prompt: { text: "follow up", parts: [] }, delivery: "queue" }],
+    onQueuedPromptAction: async () => {},
+  })
+
+  try {
+    await app.renderOnce()
+    expect(app.captureCharFrame()).toContain("ctrl+m q 1 pending")
+    app.mockInput.pressKey("m", { ctrl: true })
+    app.mockInput.pressKey("q")
+    await app.renderOnce()
+    expect(app.captureCharFrame()).toContain("Pending prompts")
   } finally {
     app.cleanup()
   }
