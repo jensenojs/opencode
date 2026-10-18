@@ -442,10 +442,18 @@ const layer = Layer.effect(
       background: Effect.fn("Session.background")(function* (sessionID) {
         yield* result.get(sessionID)
         const backgrounded = yield* jobs.backgroundAll({ sessionID })
+        yield* Effect.logInfo("session.background", {
+          sessionID,
+          at: new Date().toISOString(),
+          backgrounded: backgrounded.map((job) => ({ id: job.id, type: job.type, title: job.title })),
+        })
         if (backgrounded.length === 0) return
         yield* result
           .synthetic({
             sessionID,
+            // Queue, not steer: a steer aborts the step that is currently running, which is the
+            // opposite of what the key is for.
+            delivery: "queue",
             text: [
               "User requested that active blocking work be moved to the background.",
               "",

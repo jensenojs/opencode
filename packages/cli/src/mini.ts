@@ -18,8 +18,10 @@ export type MiniCommandInput = {
   model?: string
   agent?: string
   prompt?: string
+  prefill?: string
   replay?: boolean
   replayLimit?: number
+  leader?: string
   demo?: boolean
   tuiConfig?: MiniFrontendInput["tuiConfig"]
   config?: MiniFrontendInput["config"]
@@ -55,6 +57,7 @@ export async function runMini(input: MiniCommandInput) {
               continue: input.continue,
               session: input.session,
               fork: input.fork,
+              followCwdOnResume: true,
               model: requested,
               agent: input.agent,
               environment,
@@ -67,6 +70,12 @@ export async function runMini(input: MiniCommandInput) {
             }),
         })
         const target = resolved.value
+        if (target.resume && target.session.location.directory !== directory) {
+          // Follow the user: tools run where mini was launched, history is kept.
+          await resolved.sdk.session
+            .move({ sessionID: target.session.id, directory })
+            .catch(() => {})
+        }
         return {
           sdk: resolved.sdk,
           sessionID: target.session.id,
@@ -120,8 +129,10 @@ export async function runMini(input: MiniCommandInput) {
         variant: requested?.variant,
         files: [],
         initialInput,
+        prefill: input.prefill,
         replay: input.replay ?? true,
         replayLimit: input.replayLimit,
+        leader: input.leader,
         demo: input.demo,
         tuiConfig: input.tuiConfig,
         config: input.config,

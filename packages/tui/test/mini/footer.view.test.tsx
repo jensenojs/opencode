@@ -13,6 +13,7 @@ import { testRender } from "@opentui/solid"
 import { createSignal } from "solid-js"
 import type { FormInfo } from "@opencode/client/promise"
 import { Keymap } from "../../src/context/keymap"
+import { withLeader } from "../../src/mini/footer"
 import type { ClipboardContent, ClipboardService } from "../../src/context/clipboard"
 import {
   RUN_COMMAND_PANEL_ROWS,
@@ -21,7 +22,7 @@ import {
   RunCommandMenuBody,
   RunModelSelectBody,
   RunSettingsBody,
-  RunSubagentSelectBody,
+  RunSessionPickerBody,
   RunVariantSelectBody,
 } from "../../src/mini/footer.command"
 import { RunFooterView } from "../../src/mini/footer.view"
@@ -33,6 +34,7 @@ import { resolveMiniSettings } from "../../src/mini/runtime.boot"
 import { applyMiniSettingChange } from "../../src/mini/verbosity"
 import type {
   FooterQueuedPrompt,
+  FooterShellRow,
   FooterState,
   FooterSubagentState,
   FooterSubagentTab,
@@ -45,6 +47,7 @@ import type {
   RunInput,
   RunPrompt,
   RunProvider,
+  RunSkill,
   RunTuiConfig,
   StreamCommit,
 } from "../../src/mini/types"
@@ -55,6 +58,11 @@ import { tmpdir } from "../fixture/fixture"
 import { diffImageFixture } from "../fixture/diff-image"
 
 const tuiConfig = createTuiResolvedConfig()
+// The fork binds ctrl+x to "zom.dismiss" (hide mini). In tests that exercise
+// leader chords (ctrl+x q ...) from an empty composer, dismiss would swallow
+// the chord — that shadowing is intended product behavior, covered elsewhere;
+// disable it here so queue tests keep testing the queue.
+const noDismissConfig = createTuiResolvedConfig({ keybinds: { "zom.dismiss": "none" } })
 
 async function nativeLightTheme() {
   await using tmp = await tmpdir()
@@ -131,6 +139,7 @@ function subagent(input: {
 function footerState(input: Partial<FooterState> = {}) {
   return createSignal<FooterState>({
     phase: "idle",
+    blocked: false,
     status: "",
     notice: "",
     model: "gpt-5",
@@ -145,11 +154,14 @@ function footerState(input: Partial<FooterState> = {}) {
 async function renderFooter(
   input: {
     tuiConfig?: RunTuiConfig
+    leader?: string
     commands?: RunCommand[]
     theme?: () => RunTheme
     providers?: RunProvider[]
     agents?: RunAgent[]
+    skills?: RunSkill[]
     currentAgent?: string
+    sessionTitle?: string
     currentModel?: RunInput["model"]
     currentVariant?: string
     subagents?: FooterSubagentState
@@ -168,6 +180,10 @@ async function renderFooter(
     onMiniSettingChange?: (change: MiniSettingChange) => void
     queuedPrompts?: FooterQueuedPrompt[]
     onQueuedPromptAction?: (action: QueuedPromptAction, inboxID: string) => Promise<void>
+    shells?: () => Promise<FooterShellRow[]>
+    onKillShell?: (id: string) => Promise<void>
+    onExit?: () => void
+    onBackground?: () => void
   } = {},
 ) {
   const [view, setView] = createSignal<FooterView>(input.view ?? { type: "prompt" })
@@ -176,7 +192,10 @@ async function renderFooter(
   )
   const [state, setState] = footerState(input.state)
   const [queuedPrompts, setQueuedPrompts] = createSignal(input.queuedPrompts ?? [])
-  const config = { ...(input.tuiConfig ?? tuiConfig), animations: input.tuiConfig?.animations ?? false }
+  const config = withLeader(
+    { ...(input.tuiConfig ?? tuiConfig), animations: input.tuiConfig?.animations ?? false },
+    input.leader,
+  )
   const [miniSettings, setMiniSettings] = createSignal<MiniSettings>(input.miniSettings ?? resolveMiniSettings())
   function Harness() {
     return (
@@ -186,9 +205,11 @@ async function renderFooter(
           findFiles={async () => []}
           agents={() => input.agents ?? []}
           references={() => []}
+          skills={() => input.skills ?? []}
           commands={() => input.commands ?? []}
           providers={() => input.providers}
           currentAgent={() => input.currentAgent ?? "Build"}
+          sessionTitle={() => input.sessionTitle}
           currentAgentID={() => input.currentAgent?.toLowerCase() ?? "build"}
           currentModel={() => input.currentModel}
           variants={() => []}
@@ -212,7 +233,8 @@ async function renderFooter(
           onQueuedPromptAction={input.onQueuedPromptAction}
           onEditorOpen={async () => undefined}
           onInputClear={() => {}}
-          onExit={() => {}}
+          onExit={input.onExit ?? (() => {})}
+          onBackground={input.onBackground}
           onAgentSelect={() => {}}
           onModelSelect={() => {}}
           onVariantSelect={() => {}}
@@ -220,6 +242,8 @@ async function renderFooter(
           onLayout={() => {}}
           onStatus={(status) => input.onStatus?.(status)}
           onMiniSettingChange={(change) => input.onMiniSettingChange?.(change)}
+          listShells={input.shells}
+          killShell={input.onKillShell}
         />
       </Keymap.Provider>
     )
@@ -480,6 +504,37 @@ test("mini attaches dropped image paths and removes attachments with their label
   }
 })
 
+test("mini lists skills in the @ menu and submits them as skill parts", async () => {
+  const submitted: RunPrompt[] = []
+  const app = await renderFooter({
+    skills: [{ id: "pdf", name: "PDF", description: "work with PDF files" }],
+    onSubmit: (prompt) => {
+      submitted.push(prompt)
+      return true
+    },
+  })
+  try {
+    await app.renderOnce()
+    await app.mockInput.typeText("@pd")
+    await app.renderOnce()
+    expect(app.captureCharFrame()).toContain("@pdf")
+    app.mockInput.pressEnter()
+    await app.renderOnce()
+    expect(submitted).toHaveLength(0)
+    app.mockInput.pressEnter()
+    await app.waitFor(() => submitted.length === 1)
+    expect(submitted[0]?.parts).toEqual([
+      {
+        type: "skill",
+        id: "pdf",
+        source: { start: 0, end: 4, value: "@pdf" },
+      },
+    ])
+  } finally {
+    app.cleanup()
+  }
+})
+
 test("mini preserves mentionless images through draft edits and a rejected submission", async () => {
   const part = {
     type: "file" as const,
@@ -568,6 +623,47 @@ test.each([56, 160])("exit confirmation replaces routine footer details at %i co
     expect(app.captureCharFrame()).toBe(initial)
   } finally {
     app.cleanup()
+  }
+})
+
+test("status name slot follows the setting and falls back to the agent", async () => {
+  const render = (miniSettings: MiniSettings, sessionTitle?: string) =>
+    renderFooter({
+      width: 160,
+      currentAgent: "Build",
+      sessionTitle,
+      miniSettings,
+      providers: [provider()],
+      currentModel: { providerID: "opencode", modelID: "gpt-5" },
+    })
+  const frameFor = async (app: Awaited<ReturnType<typeof renderFooter>>) => {
+    await app.renderOnce()
+    return app.captureCharFrame()
+  }
+
+  const titled = await render({ ...resolveMiniSettings(), status_name: "session" }, "Refactor auth flow")
+  try {
+    const frame = await frameFor(titled)
+    expect(frame).toContain("Refactor auth flow")
+    expect(frame).not.toContain("Build")
+  } finally {
+    titled.cleanup()
+  }
+
+  const untitled = await render({ ...resolveMiniSettings(), status_name: "session" })
+  try {
+    expect(await frameFor(untitled)).toContain("Build")
+  } finally {
+    untitled.cleanup()
+  }
+
+  const agentOnly = await render({ ...resolveMiniSettings(), status_name: "agent" }, "Refactor auth flow")
+  try {
+    const frame = await frameFor(agentOnly)
+    expect(frame).toContain("Build")
+    expect(frame).not.toContain("Refactor auth flow")
+  } finally {
+    agentOnly.cleanup()
   }
 })
 
@@ -959,6 +1055,7 @@ test.each([false, true])("settings change preferences and preview the work spinn
     expect(frame).toContain("Shell")
     expect(frame).toContain("Turn summary")
     expect(frame).toContain("Footer details")
+    expect(frame).toContain("Status name")
     expect(frame).toContain("Splash")
     expect(frame).toContain("Monochrome UI")
     expect(frame).toContain("left/right change")
@@ -1006,7 +1103,13 @@ test.each([false, true])("settings change preferences and preview the work spinn
       turn_summary: "hide",
     })
 
+    // Turn summary -> Footer details -> Status name
     app.mockInput.pressKey("ARROW_DOWN")
+    app.mockInput.pressKey("ARROW_DOWN")
+    app.mockInput.pressKey("ARROW_RIGHT")
+    await app.renderOnce()
+    expect(settings().status_name).toBe("session")
+
     app.mockInput.pressKey("ARROW_DOWN")
     app.mockInput.pressKey("ARROW_RIGHT")
     await app.renderOnce()
@@ -1164,9 +1267,14 @@ test("direct subagent panel toggles between active and inactive subagents", asyn
   const app = await testRender(
     () => (
       <box width={100} height={RUN_SUBAGENT_PANEL_ROWS}>
-        <RunSubagentSelectBody
+        <RunSessionPickerBody
           theme={() => RUN_THEME_FALLBACK.footer}
+          tab={() => "subagents"}
+          onTab={() => {}}
           tabs={tabs}
+          subagentLabel="Subagents"
+          shellsLabel="Shell"
+          onKill={() => {}}
           current={current}
           onClose={() => {}}
           onSelect={() => {}}
@@ -1187,7 +1295,7 @@ test("direct subagent panel toggles between active and inactive subagents", asyn
     const frame = app.captureCharFrame()
     const list = panelMenu(app.renderer.root)
 
-    expect(frame).toContain("Select subagent")
+    expect(frame).toContain("Subagents")
     expect(frame).toContain("Inspect auth flow")
     expect(frame).not.toContain("Write migration plan")
     expect(frame).not.toContain("done")
@@ -1210,6 +1318,41 @@ test("direct subagent panel toggles between active and inactive subagents", asyn
   }
 })
 
+test("down opens the picker with the shell tab when no subagents are running", async () => {
+  const killed: string[] = []
+  const app = await renderFooter({
+    shells: async () => [{ id: "sh_1", command: "sleep 100", started: Date.now() - 5000 }],
+    onKillShell: async (id) => {
+      killed.push(id)
+    },
+  })
+
+  try {
+    await app.renderOnce()
+    app.mockInput.pressArrow("down")
+    await app.renderOnce()
+    await Bun.sleep(0)
+    await app.renderOnce()
+
+    const subagents = app.captureCharFrame()
+    expect(subagents).toContain("Subagents")
+    expect(subagents).toContain("Shell")
+
+    app.mockInput.pressArrow("right")
+    await app.renderOnce()
+    await Bun.sleep(0)
+    await app.renderOnce()
+
+    expect(app.captureCharFrame()).toContain("sleep 100")
+
+    app.mockInput.pressKey("x")
+    await app.renderOnce()
+    expect(killed).toEqual(["sh_1"])
+  } finally {
+    app.cleanup()
+  }
+})
+
 test("direct subagent panel closes when moving up from the first item", async () => {
   const [tabs] = createSignal([
     subagent({ sessionID: "s-1", label: "Explore", description: "Inspect auth flow" }),
@@ -1221,9 +1364,14 @@ test("direct subagent panel closes when moving up from the first item", async ()
   const app = await testRender(
     () => (
       <box width={100} height={RUN_SUBAGENT_PANEL_ROWS}>
-        <RunSubagentSelectBody
+        <RunSessionPickerBody
           theme={() => RUN_THEME_FALLBACK.footer}
+          tab={() => "subagents"}
+          onTab={() => {}}
           tabs={tabs}
+          subagentLabel="Subagents"
+          shellsLabel="Shell"
+          onKill={() => {}}
           current={current}
           onClose={() => closed++}
           onSelect={() => {}}
@@ -1262,12 +1410,12 @@ test.each(["queue", "steer"] as const)("direct footer toggles and deletes pendin
 
   try {
     await app.renderOnce()
-    expect(app.captureCharFrame()).toContain("ctrl+x q 1 pending")
+    expect(app.captureCharFrame()).toContain("ctrl+m q 1 pending")
     app.mockInput.pressKey("ARROW_DOWN")
     await app.renderOnce()
     expect(app.captureCharFrame()).not.toContain("Pending prompts")
 
-    app.mockInput.pressKey("x", { ctrl: true })
+    app.mockInput.pressKey("m", { ctrl: true })
     app.mockInput.pressKey("q")
     await app.renderOnce()
     const frame = app.captureCharFrame()
@@ -1285,7 +1433,7 @@ test.each(["queue", "steer"] as const)("direct footer toggles and deletes pendin
     expect(actions).toEqual([`${delivery === "queue" ? "steer" : "queue"}:m-1`])
     expect(app.captureCharFrame()).toContain("1 pending")
 
-    app.mockInput.pressKey("x", { ctrl: true })
+    app.mockInput.pressKey("m", { ctrl: true })
     app.mockInput.pressKey("q")
     await app.renderOnce()
     expect(app.captureCharFrame()).toContain(delivery === "queue" ? "steering" : "queued")
@@ -1296,6 +1444,27 @@ test.each(["queue", "steer"] as const)("direct footer toggles and deletes pendin
     expect(actions.at(-1)).toBe("cancel:m-1")
     expect(app.captureCharFrame()).not.toContain("Pending prompts")
     expect(app.captureCharFrame()).not.toContain("1 pending")
+  } finally {
+    app.cleanup()
+  }
+})
+
+test("a custom leader key arms the mini leader chords", async () => {
+  const app = await renderFooter({
+    height: RUN_SUBAGENT_PANEL_ROWS,
+    leader: "ctrl+m",
+    state: { phase: "running" },
+    queuedPrompts: [{ messageID: "m-1", prompt: { text: "follow up", parts: [] }, delivery: "queue" }],
+    onQueuedPromptAction: async () => {},
+  })
+
+  try {
+    await app.renderOnce()
+    expect(app.captureCharFrame()).toContain("ctrl+m q 1 pending")
+    app.mockInput.pressKey("m", { ctrl: true })
+    app.mockInput.pressKey("q")
+    await app.renderOnce()
+    expect(app.captureCharFrame()).toContain("Pending prompts")
   } finally {
     app.cleanup()
   }
@@ -1314,6 +1483,7 @@ test("undo appends a pending prompt to the draft", async () => {
     delivery: "queue",
   }
   const app = await renderFooter({
+    tuiConfig: noDismissConfig,
     queuedPrompts: [queued],
     onSubmit: (prompt) => {
       submitted.push(prompt)
@@ -1327,7 +1497,7 @@ test("undo appends a pending prompt to the draft", async () => {
   try {
     await app.renderOnce()
     await app.mockInput.typeText("existing draft")
-    app.mockInput.pressKey("x", { ctrl: true })
+    app.mockInput.pressKey("m", { ctrl: true })
     app.mockInput.pressKey("q")
     await app.renderOnce()
     app.mockInput.pressKey("u", { ctrl: true })
@@ -1351,6 +1521,7 @@ test("undo appends a pending prompt to the draft", async () => {
 test("undo leaves the queue and input alone when cancellation fails", async () => {
   const statuses: string[] = []
   const app = await renderFooter({
+    tuiConfig: noDismissConfig,
     queuedPrompts: [{ messageID: "m-1", prompt: { text: "still queued", parts: [] }, delivery: "queue" }],
     onStatus: (status) => statuses.push(status),
     onQueuedPromptAction: async () => {
@@ -1359,7 +1530,7 @@ test("undo leaves the queue and input alone when cancellation fails", async () =
   })
   try {
     await app.renderOnce()
-    app.mockInput.pressKey("x", { ctrl: true })
+    app.mockInput.pressKey("m", { ctrl: true })
     app.mockInput.pressKey("q")
     await app.renderOnce()
     app.mockInput.pressKey("u", { ctrl: true })
@@ -1378,6 +1549,7 @@ test("undo leaves the queue and input alone when cancellation fails", async () =
 test("undo retains mentioned files when the prompt is sent again", async () => {
   const submitted: RunPrompt[] = []
   const app = await renderFooter({
+    tuiConfig: noDismissConfig,
     queuedPrompts: [
       {
         messageID: "m-1",
@@ -1406,7 +1578,7 @@ test("undo retains mentioned files when the prompt is sent again", async () => {
   })
   try {
     await app.renderOnce()
-    app.mockInput.pressKey("x", { ctrl: true })
+    app.mockInput.pressKey("m", { ctrl: true })
     app.mockInput.pressKey("q")
     await app.renderOnce()
     app.mockInput.pressKey("u", { ctrl: true })
@@ -1427,6 +1599,7 @@ test("undo retains mentioned files when the prompt is sent again", async () => {
 test("direct footer steers the oldest queued prompt from an empty composer", async () => {
   const steered: string[] = []
   const app = await renderFooter({
+    tuiConfig: noDismissConfig,
     queuedPrompts: [
       { messageID: "m-steering", prompt: { text: "already steering", parts: [] }, delivery: "steer" },
       { messageID: "m-1", prompt: { text: "first", parts: [] }, delivery: "queue" },
@@ -1439,7 +1612,7 @@ test("direct footer steers the oldest queued prompt from an empty composer", asy
 
   try {
     await app.renderOnce()
-    app.mockInput.pressKey("x", { ctrl: true })
+    app.mockInput.pressKey("m", { ctrl: true })
     app.mockInput.pressEnter()
     await Bun.sleep(0)
     expect(steered).toEqual([])
@@ -1471,7 +1644,7 @@ test("direct footer preserves steer and queue submission shortcuts while busy", 
     app.mockInput.pressEnter()
     await Bun.sleep(0)
     await app.mockInput.typeText("queue later")
-    app.mockInput.pressKey("x", { ctrl: true })
+    app.mockInput.pressKey("m", { ctrl: true })
     app.mockInput.pressEnter()
     await Bun.sleep(0)
     expect(submitted).toEqual([
@@ -1515,6 +1688,7 @@ test("direct footer rejects local commands submitted with the queue shortcut", a
   const submitted: RunPrompt[] = []
   const statuses: string[] = []
   const app = await renderFooter({
+    tuiConfig: noDismissConfig,
     onSubmit: (prompt) => {
       submitted.push(prompt)
       return true
@@ -1525,7 +1699,7 @@ test("direct footer rejects local commands submitted with the queue shortcut", a
   try {
     await app.renderOnce()
     await app.mockInput.typeText("/settings ")
-    app.mockInput.pressKey("x", { ctrl: true })
+    app.mockInput.pressKey("m", { ctrl: true })
     app.mockInput.pressEnter()
     await Bun.sleep(0)
     expect(submitted).toEqual([])
@@ -1712,7 +1886,7 @@ test("direct footer counts queued and steering work while running", async () => 
     const frame = app.captureCharFrame()
     const transparent = RGBA.fromValues(0, 0, 0, 0).toInts()
     const statusline = footerStatusline(app.renderer.root)
-    expect(frame).toContain("esc stop · ctrl+x q 2 pending · ↓ 1 subagent · ctrl+b background · Build")
+    expect(frame).toContain("esc stop · ctrl+m q 2 pending · ↓ 1 subagent · ctrl+b background · Build")
     expect(frame).toMatch(/opencode · ctrl\+p menu *$/m)
     expect(frame).not.toContain("1 agent")
     expect(statusline.backgroundColor.toInts()).toEqual(transparent)
@@ -1832,6 +2006,7 @@ test.each([8, 12])("production footer grows for wrapped instructions in %i rows"
     findFiles: async () => [],
     agents: [{ id: "build", name: "Build", mode: "primary", hidden: false }],
     references: [],
+    skills: [],
     agent: "build",
     modelLabel: "GPT-5",
     model: undefined,
@@ -1849,6 +2024,7 @@ test.each([8, 12])("production footer grows for wrapped instructions in %i rows"
         splash: "show",
         work_spinner: "block-soft-slide",
         mono: false,
+        status_name: "agent",
       },
     },
     onPermissionReply: () => {},
@@ -1917,6 +2093,7 @@ test.each(["ctrl+i", "none"])("takeovers preserve configured shortcuts with hidd
       splash: "show",
       work_spinner: "block-soft-slide",
       mono: false,
+      status_name: "agent",
     },
   })
   try {
@@ -1929,6 +2106,52 @@ test.each(["ctrl+i", "none"])("takeovers preserve configured shortcuts with hidd
       )
       for (const hidden of ["ctrl+c", "esc", "menu", "Build", "gpt-5"]) expect(frame).not.toContain(hidden)
     }
+  } finally {
+    app.cleanup()
+  }
+})
+
+test("ctrl+b stays inert while only backgrounded shells run", async () => {
+  let backgrounded = 0
+  const app = await renderFooter({
+    state: { phase: "running", blocked: false },
+    shells: async () => [{ id: "sh_bg", command: "sleep 400", started: Date.now() }],
+    onBackground: () => {
+      backgrounded++
+    },
+  })
+  try {
+    await app.renderOnce()
+    app.mockInput.pressKey("b", { ctrl: true })
+    await app.renderOnce()
+    expect(backgrounded).toBe(0)
+    expect(app.captureCharFrame()).not.toContain("ctrl+b")
+  } finally {
+    app.cleanup()
+  }
+})
+
+test("ctrl+b keeps a running turn running without hiding mini", async () => {
+  let backgrounded = 0
+  let exited = 0
+  const statuses: string[] = []
+  const app = await renderFooter({
+    state: { phase: "running", blocked: true },
+    onBackground: () => {
+      backgrounded++
+    },
+    onStatus: (status) => statuses.push(status),
+    onExit: () => {
+      exited++
+    },
+  })
+  try {
+    await app.renderOnce()
+    app.mockInput.pressKey("b", { ctrl: true })
+    await app.renderOnce()
+    expect(backgrounded).toBe(1)
+    expect(statuses).toEqual(["sent blocking work to background"])
+    expect(exited).toBe(0)
   } finally {
     app.cleanup()
   }
@@ -2235,6 +2458,7 @@ test("direct footer hides routine activity and shows explicit notices", async ()
       splash: "show",
       work_spinner: "block-soft-slide",
       mono: true,
+      status_name: "agent",
     },
     mono: true,
     onStatus: (value) => (status = value),

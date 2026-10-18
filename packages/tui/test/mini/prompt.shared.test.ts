@@ -7,6 +7,7 @@ import {
   movePromptHistory,
   promptAppend,
   pushPromptHistory,
+  renameCommand,
 } from "../../src/mini/prompt.shared"
 import type { RunPrompt } from "../../src/mini/types"
 
@@ -105,6 +106,13 @@ describe("run prompt shared", () => {
     expect(isCompactCommand("/compact")).toBe(true)
     expect(isCompactCommand(" /COMPACT ")).toBe(true)
     expect(isCompactCommand("/summarize")).toBe(false)
+  })
+
+  test("parses the rename command and its title", () => {
+    expect(renameCommand("/rename")).toBe("")
+    expect(renameCommand(" /RENAME  refactor auth ")).toBe("refactor auth")
+    expect(renameCommand("/renamed foo")).toBeUndefined()
+    expect(renameCommand("rename foo")).toBeUndefined()
   })
 })
 

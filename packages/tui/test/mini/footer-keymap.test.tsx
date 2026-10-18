@@ -11,6 +11,7 @@ import type { FooterState, FooterSubagentState, FooterView } from "../../src/min
 async function renderSubagent(interrupt: "ctrl+i" | "none") {
   const [state] = createSignal<FooterState>({
     phase: "idle",
+  blocked: false,
     status: "",
     notice: "",
     model: "gpt-5",
@@ -53,6 +54,7 @@ async function renderSubagent(interrupt: "ctrl+i" | "none") {
           findFiles={async () => []}
           agents={() => []}
           references={() => []}
+          skills={() => []}
           commands={() => []}
           providers={() => undefined}
           currentAgent={() => "Build"}
@@ -74,6 +76,7 @@ async function renderSubagent(interrupt: "ctrl+i" | "none") {
             splash: "show",
             work_spinner: "block-soft-slide",
             mono: false,
+            status_name: "agent",
           })}
           mono={false}
           onSubmit={() => true}
@@ -107,7 +110,7 @@ async function openSubagent(app: Awaited<ReturnType<typeof testRender>>) {
   expect(app.renderer.currentFocusedEditor?.plainText).toBe("")
   app.mockInput.pressArrow("down")
   await app.renderOnce()
-  expect(app.captureCharFrame()).toContain("Select subagent")
+  expect(app.captureCharFrame()).toContain("Subagents")
   app.mockInput.pressEnter()
   await app.renderOnce()
 }
