@@ -135,6 +135,9 @@ type PromptInput = {
   onInterrupt: () => boolean
   onEditorOpen: (input: { value: string }) => Promise<string | undefined>
   onInputClear: () => void
+  // 草稿变化时上报一份快照，供退出后仍能找回（见 draft.store.ts）。
+  // sync 为真表示马上要退出，必须同步落盘。
+  onDraftChange?: (draft: RunPrompt, options?: { sync?: boolean }) => void
   onExitRequest?: () => boolean
   onExit: () => void
   onSettings: () => void
@@ -529,6 +532,12 @@ export function createPromptState(input: PromptInput): PromptState {
       { kind: "slash", name: "new", display: "/new", description: "start a new session" } satisfies SlashOption,
       {
         kind: "slash",
+        name: "rename",
+        display: "/rename",
+        description: "rename this session (a bare /rename regenerates the title)",
+      } satisfies SlashOption,
+      {
+        kind: "slash",
         name: "compact",
         display: "/compact",
         description: "compact older session context to free space",
@@ -721,6 +730,7 @@ export function createPromptState(input: PromptInput): PromptState {
     area.cursorOffset = Math.min(cursor, stringWidth(area.plainText))
     scheduleRows()
     area.focus()
+    input.onDraftChange?.(draft)
   }
 
   const resetDraft = () => {
@@ -732,6 +742,7 @@ export function createPromptState(input: PromptInput): PromptState {
     clearParts()
     hide()
     draft = emptyPrompt(shell())
+    input.onDraftChange?.(draft)
     if (!area || area.isDestroyed) {
       return
     }
@@ -857,6 +868,7 @@ export function createPromptState(input: PromptInput): PromptState {
       source: { type: "file", text: { start, end, value } },
     })
     syncDraft()
+    input.onDraftChange?.(draft)
   }
 
   const paste = (text?: string) => {
@@ -1055,6 +1067,9 @@ export function createPromptState(input: PromptInput): PromptState {
       const cursor = area.cursorOffset
       const head = parseSlashHead(area.plainText)
       const local = !shell() && (next.name === "new" || isExitCommand(`/${next.name}`))
+      // `/rename` needs an argument: leave it in the input instead of sending
+      // a bare command that would regenerate the title.
+      const edit = !shell() && next.name === "rename"
       const separator = !shell() && !local && head && /\s/.test(area.plainText[head.end] ?? "") ? "" : " "
       const text = `/${next.name}${separator}`
 
@@ -1069,7 +1084,7 @@ export function createPromptState(input: PromptInput): PromptState {
       area.cursorOffset = stringWidth(text)
       hide()
       syncDraft()
-      if (!shell()) {
+      if (!shell() && !edit) {
         submitPrompt(promptCopy(draft), delivery)
         return
       }
@@ -1541,6 +1556,7 @@ export function createPromptState(input: PromptInput): PromptState {
       if (!applyingPaste && area && area.plainText !== draft.text) revision += 1
       input.onInputClear()
       syncDraft()
+      input.onDraftChange?.(draft)
       refresh()
       scheduleRows()
     },

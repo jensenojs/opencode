@@ -9,11 +9,13 @@
 // Also wires SIGINT so Ctrl-c clears a live prompt draft first, then falls
 // back to the usual two-press exit sequence through RunFooter.requestExit().
 import path from "path"
+import { appendFileSync, readFileSync, statSync, writeFileSync, writeSync } from "fs"
 import {
   CliRenderEvents,
   buildKittyKeyboardFlags,
   createCliRenderer,
   type CliRenderer,
+  type KeyEvent,
   type ScrollbackWriter,
 } from "@opentui/core"
 import { isFallbackTitle } from "@opencode/util/session-title-fallback"
@@ -29,6 +31,7 @@ import type {
   MiniHost,
   PermissionReply,
   QueuedPromptAction,
+  FooterShellRow,
   RunAgent,
   RunInput,
   RunPrompt,
@@ -66,7 +69,11 @@ export type LifecycleInput = {
   agent: string | undefined
   model: RunInput["model"]
   variant: string | undefined
+  leader?: string
   tuiConfig: RunTuiConfig | Promise<RunTuiConfig>
+  // Resolved settings, including the fork-owned status-line name that does not
+  // come from tuiConfig (see settings.store.ts). Read after tuiConfig lands.
+  getMiniSettings?: () => MiniSettings
   onMiniSettingChange?: (change: MiniSettingChange) => Promise<MiniSettings>
   onPermissionReply: (input: PermissionReply) => void | Promise<void>
   onFormReply: (input: FormReply) => void | Promise<void>
@@ -78,6 +85,8 @@ export type LifecycleInput = {
   onInterrupt?: () => void
   onBackground?: () => void
   onQueuedPromptAction?: (action: QueuedPromptAction, inboxID: string) => Promise<void>
+  listShells?: () => Promise<FooterShellRow[]>
+  killShell?: (id: string) => Promise<void>
   onSubagentSelect?: (sessionID: string | undefined) => void
   onSubagentInterrupt?: (sessionID: string) => void
 }
@@ -87,7 +96,7 @@ export type Lifecycle = {
   onResize(fn: () => void): () => void
   refreshTheme(): void
   setTitle(title?: string): void
-  resetForReplay(): Promise<void>
+  resetForReplay(splash?: boolean): Promise<void>
   close(input: { showExit: boolean; sessionTitle?: string; sessionID?: string; history?: RunPrompt[] }): Promise<void>
 }
 
@@ -152,7 +161,7 @@ function queueSplash(
 export async function createRuntimeLifecycle(input: LifecycleInput): Promise<Lifecycle> {
   const footerTask = import("./footer")
   const tuiConfig = await input.tuiConfig
-  const miniSettings = resolveMiniSettings(tuiConfig)
+  const miniSettings = input.getMiniSettings?.() ?? resolveMiniSettings(tuiConfig)
   const mono = miniSettings.mono
   const renderer = await createCliRenderer({
     stdin: input.host.terminal.stdin,
@@ -172,12 +181,13 @@ export async function createRuntimeLifecycle(input: LifecycleInput): Promise<Lif
     clearOnShutdown: false,
   })
   if (mono) renderer.on(CliRenderEvents.EXTERNAL_OUTPUT, monoSnapshot)
+  let mounted: { setSessionTitle(title: string | undefined): void } | undefined
   const setTitle = (title?: string) => {
+    mounted?.setSessionTitle(title)
     if (input.host.platform !== "linux") return
     if (!title || isFallbackTitle(title)) return renderer.setTerminalTitle("OpenCode")
     renderer.setTerminalTitle(`OC | ${title.length > 40 ? title.slice(0, 37) + "…" : title}`)
   }
-  setTitle(input.sessionTitle)
   const theme = await resolveRunTheme(renderer, tuiConfig.theme, mono)
   renderer.setBackgroundColor(theme.background)
   const state: SplashState = {
@@ -226,6 +236,7 @@ export async function createRuntimeLifecycle(input: LifecycleInput): Promise<Lif
     wrote: true,
     startup,
     tuiConfig,
+    leader: input.leader,
     miniSettings: {
       current: miniSettings,
       update: input.onMiniSettingChange,
@@ -247,6 +258,8 @@ export async function createRuntimeLifecycle(input: LifecycleInput): Promise<Lif
     onInterrupt: input.onInterrupt,
     onBackground: input.onBackground,
     onQueuedPromptAction: input.onQueuedPromptAction,
+    listShells: input.listShells,
+    killShell: input.killShell,
     onEditorOpen: async ({ value }) => {
       if (closed || renderer.isDestroyed) {
         return
@@ -271,6 +284,11 @@ export async function createRuntimeLifecycle(input: LifecycleInput): Promise<Lif
     onSubagentSelect: input.onSubagentSelect,
     onSubagentInterrupt: input.onSubagentInterrupt,
   })
+
+  // The footer is the first sink that can hold the title; seed it with the
+  // session's current one, then every later setTitle keeps both in step.
+  mounted = footer
+  setTitle(input.sessionTitle)
 
   const sigint = () => {
     footer.requestExit()
@@ -297,6 +315,121 @@ export async function createRuntimeLifecycle(input: LifecycleInput): Promise<Lif
 
   attachSigint()
 
+  // ctrl+z that reaches the process as a signal (cooked-mode tty VSUSP)
+  // becomes a clean exit, never a stopped process: a stopped mini keeps its
+  // pane hostage (terminal kill confirmation) and its renderer would repaint
+  // at a stale anchor. In raw mode ctrl+z arrives as a key event and is
+  // handled by the keymap layer instead; this handler covers the rest.
+  const onTstpSignal = () => {
+    footer.close()
+  }
+  process.on("SIGTSTP", onTstpSignal)
+
+  // Unclaimed keys (zom fork): a key event that survives the keymap (no
+  // defaultPrevented / propagationStopped) and is not printable composer
+  // input used to be handed to the shell by writing its raw bytes to
+  // ZOM_PASSTHROUGH_FILE and closing mini. That made every unbound key a
+  // trapdoor — with the kitty keyboard protocol enabled, perfectly ordinary
+  // keys arrive as CSI u sequences mini does not bind, and pressing one
+  // killed the composer mid-edit.
+  //
+  // New default: unclaimed keys never close mini. Each one is appended to a
+  // rolling log (ZOM_UNCLAIMED_LOG, default "${ZOM_PASSTHROUGH_FILE}.keys.log"
+  // when the widget sets the passthrough file) with its stroke, source and
+  // raw bytes hex, so a swallowed key is diagnosable after the fact. The log
+  // is capped at ZOM_UNCLAIMED_LOG_CAP bytes (default 64 KiB) by keeping the
+  // newest tail.
+  //
+  // The old exit-and-replay path survives only as an explicit allowlist:
+  // ZOM_PASSTHROUGH_KEYS="ctrl+r,ctrl+q" makes exactly those strokes write
+  // their raw bytes to ZOM_PASSTHROUGH_FILE and close mini, for users who
+  // want a key to take effect in the shell instead.
+  const passthroughFile = process.env.ZOM_PASSTHROUGH_FILE
+  const unclaimedLog = process.env.ZOM_UNCLAIMED_LOG ?? (passthroughFile ? `${passthroughFile}.keys.log` : undefined)
+  const unclaimedLogCap = Number(process.env.ZOM_UNCLAIMED_LOG_CAP ?? 65536) || 65536
+  const passthroughKeys = new Set(
+    (process.env.ZOM_PASSTHROUGH_KEYS ?? "")
+      .split(",")
+      .map((k) => k.trim().toLowerCase())
+      .filter(Boolean),
+  )
+  let detachPassthrough: (() => void) | undefined
+  if (unclaimedLog || (passthroughFile && passthroughKeys.size > 0)) {
+    const strokeOf = (event: KeyEvent) => {
+      const parts: string[] = []
+      if (event.ctrl) parts.push("ctrl")
+      if (event.shift) parts.push("shift")
+      if (event.meta || event.option) parts.push("meta")
+      if (event.super) parts.push("super")
+      if (event.hyper) parts.push("hyper")
+      parts.push(event.name === " " ? "space" : event.name.toLowerCase())
+      return parts.join("+")
+    }
+    const logUnclaimed = (event: KeyEvent, stroke: string) => {
+      if (!unclaimedLog) return
+      const line = JSON.stringify({
+        at: new Date().toISOString(),
+        stroke,
+        source: event.source ?? "unknown",
+        raw: Buffer.from(event.raw ?? "", "binary").toString("hex"),
+      })
+      try {
+        appendFileSync(unclaimedLog, line + "\n")
+        const size = statSync(unclaimedLog).size
+        if (size > unclaimedLogCap) {
+          const keep = readFileSync(unclaimedLog).subarray(-Math.floor(unclaimedLogCap / 2))
+          writeFileSync(unclaimedLog, keep)
+        }
+      } catch {
+        // An unwritable log must never disturb the composer.
+      }
+    }
+    const onPassthroughKey = (event: KeyEvent) => {
+      if (event.defaultPrevented || event.propagationStopped) {
+        return
+      }
+      const printable =
+        (event.name.length === 1 || event.name === "space") &&
+        !event.ctrl &&
+        !event.meta &&
+        !event.option &&
+        !event.super
+      if (printable) {
+        return
+      }
+      // Escape participates in pending-sequence handling and modal dismissal;
+      // with nothing pending it is unclaimed by design. Never log or forward
+      // it — a stray Esc is routine, not a lost key.
+      if (event.name === "escape") {
+        return
+      }
+      // Component useKeyboard handlers (permission dialog enter/arrows, the
+      // command palette, forms) sit on this same keyInput bus but register
+      // later, so their preventDefault() has not run yet when this listener
+      // fires. Decide only after the dispatch settles: a key a dialog claims
+      // must never be treated as unclaimed.
+      const stroke = strokeOf(event)
+      setImmediate(() => {
+        if (event.defaultPrevented || event.propagationStopped) {
+          return
+        }
+        logUnclaimed(event, stroke)
+        if (passthroughFile && passthroughKeys.has(stroke)) {
+          try {
+            appendFileSync(passthroughFile, Buffer.from(event.raw ?? "", "binary"))
+          } catch {
+            // Unwritable passthrough target must not block the exit path.
+          }
+          footer.close()
+        }
+      })
+    }
+    renderer.keyInput.on("keypress", onPassthroughKey)
+    detachPassthrough = () => {
+      renderer.keyInput.off("keypress", onPassthroughKey)
+    }
+  }
+
   const close = async (next: {
     showExit: boolean
     sessionTitle?: string
@@ -309,6 +442,28 @@ export async function createRuntimeLifecycle(input: LifecycleInput): Promise<Lif
 
     closed = true
     detachSigint()
+    detachPassthrough?.()
+    process.off("SIGTSTP", onTstpSignal)
+    // Startup queries the kitty keyboard protocol (CSI ? u); WezTerm treats
+    // the query as protocol detection and starts encoding keys kitty-style
+    // until it sees the pop (CSI < u). opentui never pops — destroy resets
+    // modifyOtherKeys, bracketed paste, and mode 2031 but leaves kitty and
+    // mode 2027 on, so ctrl combos land in the shell as literal "20;5u".
+    // Write the pops in the process exit hook: stdout is back to direct
+    // writes by then, and an empty pop stack is ignored per spec.
+    try {
+      if (process.stdout.isTTY) {
+        process.once("exit", () => {
+          try {
+            writeSync(1, "\x1b[<u\x1b[?2027l")
+          } catch {
+            // Terminal already gone.
+          }
+        })
+      }
+    } catch {
+      // Non-TTY contexts (tests, pipes) need nothing.
+    }
     let wroteExit = false
 
     try {
@@ -363,7 +518,7 @@ export async function createRuntimeLifecycle(input: LifecycleInput): Promise<Lif
       renderer.on(CliRenderEvents.RESIZE, resize)
       return () => renderer.off(CliRenderEvents.RESIZE, resize)
     },
-    async resetForReplay() {
+    async resetForReplay(splash = true) {
       if (closed || renderer.isDestroyed || footer.isClosed) {
         throw new Error("runtime closed")
       }
@@ -375,14 +530,17 @@ export async function createRuntimeLifecycle(input: LifecycleInput): Promise<Lif
 
       footer.resetForReplay(true)
       renderer.resetSplitFooterForReplay({ clearSavedLines: true })
-      renderer.writeToScrollback(
-        entrySplash({
-          version: input.host.version,
-          theme: footer.currentTheme().splash,
-          detail: directoryLabel(input.getDirectory(), input.host.paths.home),
-          mono: footer.currentMiniSettings().mono,
-        }),
-      )
+      // 手动重灌（ctrl+l）不重印启动图：那会把每次清屏都变成一次「重新开张」。
+      if (splash) {
+        renderer.writeToScrollback(
+          entrySplash({
+            version: input.host.version,
+            theme: footer.currentTheme().splash,
+            detail: directoryLabel(input.getDirectory(), input.host.paths.home),
+            mono: footer.currentMiniSettings().mono,
+          }),
+        )
+      }
       renderer.requestRender()
       await renderer.idle().catch(() => {})
     },

@@ -140,6 +140,7 @@ export type MiniHost = {
   }
   paths: {
     home: string
+    state: string
   }
   signals: {
     sigint: {
@@ -298,6 +299,13 @@ export type FooterPromptRoute =
   | { type: "model" }
   | { type: "variant" }
   | { type: "settings" }
+  | { type: "shells" }
+
+export type FooterShellRow = {
+  id: string
+  command: string
+  started: number
+}
 
 export type FooterSubagentTab = {
   sessionID: string
@@ -407,7 +415,13 @@ export type MiniSettings = {
   splash: "show" | "hide"
   work_spinner: Config.MiniWorkSpinner
   mono: boolean
+  // What the status-line name slot shows: the agent's name, or the session
+  // title (falling back to the agent name while the title is empty). Fork-owned
+  // and persisted by settings.store.ts, not by the shared tui config.
+  status_name: MiniStatusName
 }
+
+export type MiniStatusName = "agent" | "session"
 
 export type MiniVerbosity = "quiet" | "default" | "everything"
 
@@ -448,6 +462,10 @@ export type StreamCommit = {
   shell?: {
     command: string
   }
+  // Replay-phase commit: the text is already complete on disk, so the
+  // scrollback surface must render it in one static frame instead of
+  // streaming it chunk by chunk (the settle tail the summon key pays for).
+  settled?: true
 }
 
 export type LocalReplayRow = {
@@ -462,6 +480,15 @@ export type FooterApi = {
   onPrompt(fn: (input: RunPrompt) => void): () => void
   onClose(fn: () => void): () => void
   event(next: FooterEvent): void
+  setPrefill(text: string): void
+  peekPrefill(): string | undefined
+  clearPrefill(): void
+  setPrefillPrompt(draft: RunPrompt): void
+  clearPrefillPrompt(): void
+  // 草稿变更上报；退出前视图会以 {sync:true} 再报一次，runtime 侧要同步落盘。
+  onDraftChange(fn: (draft: RunPrompt, options?: { sync?: boolean }) => void): () => void
+  // ctrl+l 的重灌钩子，由 runtime 接上（与会话 resize 走同一条路径）。
+  setReplayHandler(fn: () => void): void
   append(commit: StreamCommit): void
   idle(): Promise<void>
   close(): void

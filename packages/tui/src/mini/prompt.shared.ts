@@ -84,6 +84,15 @@ export function isCompactCommand(input: string): boolean {
   return input.trim().toLowerCase() === "/compact"
 }
 
+// `/rename <title>` renames the session; a bare `/rename` asks the server to
+// regenerate the title. Returns the title (empty string for "regenerate"), or
+// undefined when the input is not a rename.
+export function renameCommand(input: string): string | undefined {
+  const text = input.trim()
+  if (!/^\/rename(?:\s|$)/i.test(text)) return undefined
+  return text.slice("/rename".length).trim()
+}
+
 export function createPromptHistory(items?: RunPrompt[]): PromptHistoryState {
   const list = (items ?? [])
     .filter((item) => item.text.trim().length > 0 || item.parts.some((part) => part.type === "file"))

@@ -74,6 +74,7 @@ async function renderSubagent(interrupt: "ctrl+i" | "none") {
             splash: "show",
             work_spinner: "block-soft-slide",
             mono: false,
+            status_name: "agent",
           })}
           mono={false}
           onSubmit={() => true}
@@ -107,7 +108,7 @@ async function openSubagent(app: Awaited<ReturnType<typeof testRender>>) {
   expect(app.renderer.currentFocusedEditor?.plainText).toBe("")
   app.mockInput.pressArrow("down")
   await app.renderOnce()
-  expect(app.captureCharFrame()).toContain("Select subagent")
+  expect(app.captureCharFrame()).toContain("Subagents")
   app.mockInput.pressEnter()
   await app.renderOnce()
 }
