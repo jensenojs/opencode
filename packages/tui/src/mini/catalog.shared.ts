@@ -6,7 +6,7 @@ import type {
   OpenCodeClient,
   ProviderListOutput,
 } from "@opencode/client/promise"
-import type { RunAgent, RunCommand, RunProvider, RunReference } from "./types"
+import type { RunAgent, RunCommand, RunProvider, RunReference, RunSkill } from "./types"
 
 type CurrentAgent = AgentListOutput["data"][number]
 type CurrentCommand = CommandListOutput["data"][number]
@@ -96,6 +96,15 @@ export async function loadRunReferences(
 ): Promise<RunReference[]> {
   const result = await sdk.reference.list(location(ref), ...requestOptions(signal))
   return result.data.filter((reference) => !reference.hidden)
+}
+
+export async function loadRunSkills(sdk: OpenCodeClient, ref: LocationRef, signal?: AbortSignal): Promise<RunSkill[]> {
+  const result = await sdk.skill.list(location(ref), ...requestOptions(signal))
+  return result.data.map((skill) => ({
+    id: skill.id,
+    name: skill.name,
+    description: skill.description,
+  }))
 }
 
 export async function loadRunProviders(

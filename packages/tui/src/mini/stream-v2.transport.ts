@@ -9,6 +9,7 @@ import type {
   SessionMessageUser,
   SessionInboxInfo,
 } from "@opencode/client/promise"
+import { ClientError } from "@opencode/client/promise"
 import { Event } from "@opencode/schema/event"
 import { SessionMessage } from "@opencode/schema/session-message"
 import { blockerStatus, pickBlockerView } from "./session-data"
@@ -48,6 +49,9 @@ type StreamInput = {
   sessionID: string
   thinking: boolean
   tools?: boolean
+  // Mirrors session.permissions from the TUI config: "autoaccept" answers a
+  // permission request as it arrives instead of parking it in the footer.
+  permissions?: "prompt" | "autoaccept"
   replay?: boolean
   replayLimit?: number
   footer: FooterApi
@@ -391,6 +395,10 @@ const catalogEvents = new Set([
   "reference.updated",
 ])
 
+// Message types the replay renderer can draw; everything else (idle,
+// location-switched, model-switched, ...) is skipped by renderMessage.
+const REPLAY_MESSAGE_TYPES = new Set(["user", "skill", "shell", "compaction", "assistant"])
+
 // session.shell resolves after the command settled server-side; the matching
 // live shell.ended event usually lands within the same tick, but hold the turn
 // briefly so the output commit renders inside it.
@@ -559,8 +567,10 @@ export async function createSessionTransport(input: StreamInput): Promise<Sessio
     write([], { phase: "idle", status })
   }
 
+  let replaying = false
   const write = (commits: StreamCommit[], patch?: Pick<FooterPatch, "phase" | "status" | "usage">) => {
     if (state.closed || controller.signal.aborted || input.footer.isClosed) return
+    if (replaying) commits.forEach((commit) => (commit.settled = true))
     if (!state.initial && state.buffered === undefined)
       commits.forEach((commit) => {
         if (!commit.messageID || !commit.partID || (commit.kind !== "assistant" && commit.kind !== "reasoning")) {
@@ -898,17 +908,51 @@ export async function createSessionTransport(input: StreamInput): Promise<Sessio
     }
   }
 
-  const projectedMessages = async (client: OpenCodeClient, signal: AbortSignal) =>
-    (
-      await client.message.list(
-        { sessionID: input.sessionID, limit: input.replayLimit ?? 200, order: "desc" },
-        { signal },
-      )
-    ).data.toReversed()
+  const projectedMessages = async (client: OpenCodeClient, signal: AbortSignal) => {
+    const limit = input.replayLimit ?? 200
+    // Metadata entries (location-switched, idle, model-switched, ...) occupy
+    // page slots but never render; overfetch so the requested replay limit
+    // still covers real turns even after sessions with many location moves.
+    // The server caps this page size at 200 and answers 400 above it; a
+    // 400 here is retried as a dropped event stream, so an uncapped overfetch
+    // turns into a permanent reconnect loop with no interrupt.
+    const page = await client.message.list(
+      { sessionID: input.sessionID, limit: Math.min(limit * 4 + 20, 200), order: "desc" },
+      { signal },
+    )
+    return page.data
+      .filter((m) => REPLAY_MESSAGE_TYPES.has(m.type))
+      .slice(0, limit)
+      .toReversed()
+  }
+
+  // Settlement only reads (session.wait, message.list); a transport timeout
+  // there is worth retrying instead of killing the process.
+  const settleRetryDelays = [250, 750, 1500]
+  const settleRead = async <T>(run: () => Promise<T>): Promise<T> => {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await run()
+      } catch (error) {
+        const transport = error instanceof ClientError && error.reason === "Transport"
+        if (!transport || attempt >= settleRetryDelays.length || controller.signal.aborted) throw error
+        input.trace?.write("settle.retry", { attempt: attempt + 1, error: formatUnknownError(error) })
+        await wait(settleRetryDelays[attempt]!, controller.signal)
+      }
+    }
+  }
 
   const settleSession = async (client: OpenCodeClient) => {
-    await client.session.wait({ sessionID: input.sessionID }, { signal: controller.signal })
-    for (const message of await projectedMessages(client, controller.signal)) renderMessage(message, true)
+    await settleRead(() => client.session.wait({ sessionID: input.sessionID }, { signal: controller.signal }))
+    // Replay renders in one static frame per entry (no streaming tail):
+    // the text is complete on disk, streaming it only delays usability.
+    replaying = true
+    try {
+      for (const message of await settleRead(() => projectedMessages(client, controller.signal)))
+        renderMessage(message, true)
+    } finally {
+      replaying = false
+    }
     paintIdle(blockerStatus(state.view))
     await input.footer.idle()
   }
@@ -1337,6 +1381,14 @@ export async function createSessionTransport(input: StreamInput): Promise<Sessio
       return
     }
     if (event.type === "permission.asked") {
+      if (input.permissions === "autoaccept") {
+        // "once" keeps the grant local to this request; the next one is
+        // auto-answered the same way, so no persistent rule accumulates.
+        void attempt.client.permission
+          .reply({ sessionID: event.data.sessionID, requestID: event.data.id, decision: "once" })
+          .catch((error) => input.trace?.write("permission.autoaccept.failed", { error: formatUnknownError(error) }))
+        return
+      }
       if (!state.permissions.some((item) => item.id === event.data.id))
         state.permissions.push(permissionTool(event.data, state.toolSources))
       syncBlockers()
