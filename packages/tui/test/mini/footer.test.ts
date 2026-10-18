@@ -131,6 +131,7 @@ async function setup(
     findFiles: async () => [],
     agents: [{ id: "build", name: "Build", mode: "primary", hidden: false }],
     references: [],
+    skills: [],
     agent: "build",
     modelLabel: "GPT-5",
     model: undefined,
