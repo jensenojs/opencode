@@ -64,6 +64,7 @@ import type {
   RunPrompt,
   RunPromptPart,
   RunReference,
+  RunSkill,
   RunTuiConfig,
 } from "./types"
 import { EmptyBorder } from "../ui/border"
@@ -116,6 +117,7 @@ type PromptInput = {
   findFiles: (query: string) => Promise<string[]>
   agents: Accessor<RunAgent[]>
   references: Accessor<RunReference[]>
+  skills: Accessor<RunSkill[]>
   commands: Accessor<RunCommand[] | undefined>
   state: Accessor<FooterState>
   view: Accessor<string>
@@ -134,6 +136,9 @@ type PromptInput = {
   onInterrupt: () => boolean
   onEditorOpen: (input: { value: string }) => Promise<string | undefined>
   onInputClear: () => void
+  // 草稿变化时上报一份快照，供退出后仍能找回（见 draft.store.ts）。
+  // sync 为真表示马上要退出，必须同步落盘。
+  onDraftChange?: (draft: RunPrompt, options?: { sync?: boolean }) => void
   onExitRequest?: () => boolean
   onExit: () => void
   onSettings: () => void
@@ -426,6 +431,23 @@ export function createPromptState(input: PromptInput): PromptState {
         },
       }))
   })
+  const skills = createMemo<Auto[]>(() => {
+    return input.skills().map((item) => ({
+      kind: "mention",
+      display: "@" + item.id,
+      value: item.id,
+      description: item.description,
+      part: {
+        type: "skill",
+        id: item.id,
+        source: {
+          start: 0,
+          end: 0,
+          value: "",
+        },
+      },
+    }))
+  })
   const references = createMemo<Auto[]>(() => {
     return input.references().map((item) => ({
       kind: "mention",
@@ -503,7 +525,7 @@ export function createPromptState(input: PromptInput): PromptState {
       return { ...item, display: paths.find((value) => stringWidth(value) <= width()) ?? paths.at(-1) ?? item.display }
     }),
   )
-  const mentionOptions = createMemo(() => [...agents(), ...files(), ...references()])
+  const mentionOptions = createMemo(() => [...agents(), ...skills(), ...files(), ...references()])
   const slashOptions = createMemo<SlashOption[]>(() => {
     const builtins = [
       {
@@ -521,6 +543,12 @@ export function createPromptState(input: PromptInput): PromptState {
         description: "configure Mini transcript output",
       } satisfies SlashOption,
       { kind: "slash", name: "new", display: "/new", description: "start a new session" } satisfies SlashOption,
+      {
+        kind: "slash",
+        name: "rename",
+        display: "/rename",
+        description: "rename this session (a bare /rename regenerates the title)",
+      } satisfies SlashOption,
       {
         kind: "slash",
         name: "compact",
@@ -555,11 +583,16 @@ export function createPromptState(input: PromptInput): PromptState {
 
     const next = stripFileLineRange(query())
     if (mode() === "mention") {
+      // Score every mention group together and rank by score, so a query that
+      // matches a path is not pushed below the menu fold by matching skills.
       return [
-        ...fuzzysort.go(next, agents(), { keys: ["value", "display", "description"] }).map((item) => item.obj),
-        ...files(),
-        ...fuzzysort.go(next, references(), { keys: ["value", "display", "description"] }).map((item) => item.obj),
+        ...fuzzysort.go(next, agents(), { keys: ["value", "display", "description"] }),
+        ...fuzzysort.go(next, skills(), { keys: ["value", "display", "description"] }),
+        ...fuzzysort.go(next, files(), { keys: ["value", "display"] }),
+        ...fuzzysort.go(next, references(), { keys: ["value", "display", "description"] }),
       ]
+        .sort((a, b) => b.score - a.score)
+        .map((item) => item.obj)
     }
 
     return fuzzysort
@@ -632,7 +665,7 @@ export function createPromptState(input: PromptInput): PromptState {
         part.type === "agent"
           ? (part.source?.value ?? "@" + part.name)
           : part.type === "skill"
-            ? (part.source?.value ?? "/" + part.id)
+            ? (part.source?.value ?? "@" + part.id)
             : (part.source?.text.value ?? "@" + (part.filename ?? ""))
       if (text !== prev) {
         continue
@@ -715,6 +748,7 @@ export function createPromptState(input: PromptInput): PromptState {
     area.cursorOffset = Math.min(cursor, measure(value.text))
     scheduleRows()
     area.focus()
+    input.onDraftChange?.(draft)
   }
 
   const resetDraft = () => {
@@ -726,6 +760,7 @@ export function createPromptState(input: PromptInput): PromptState {
     clearParts()
     hide()
     draft = emptyPrompt(shell())
+    input.onDraftChange?.(draft)
     if (!area || area.isDestroyed) {
       return
     }
@@ -852,6 +887,7 @@ export function createPromptState(input: PromptInput): PromptState {
       source: { type: "file", text: { start, end, value } },
     })
     syncDraft()
+    input.onDraftChange?.(draft)
   }
 
   const paste = (text?: string) => {
@@ -1050,6 +1086,9 @@ export function createPromptState(input: PromptInput): PromptState {
       const cursor = area.cursorOffset
       const head = parseSlashHead(area.plainText)
       const local = !shell() && (next.name === "new" || isExitCommand(`/${next.name}`))
+      // `/rename` needs an argument: leave it in the input instead of sending
+      // a bare command that would regenerate the title.
+      const edit = !shell() && next.name === "rename"
       const separator = !shell() && !local && head && /\s/.test(area.plainText[head.end] ?? "") ? "" : " "
       const text = `/${next.name}${separator}`
 
@@ -1064,7 +1103,7 @@ export function createPromptState(input: PromptInput): PromptState {
       area.cursorOffset = measure(text)
       hide()
       syncDraft()
-      if (!shell()) {
+      if (!shell() && !edit) {
         submitPrompt(promptCopy(draft), delivery)
         return
       }
@@ -1087,7 +1126,7 @@ export function createPromptState(input: PromptInput): PromptState {
     const startOffset = at()
     const endOffset = startOffset + measure(text)
     const part = structuredClone(next.part)
-    if (part.type === "agent") {
+    if (part.type === "agent" || part.type === "skill") {
       part.source = {
         start: startOffset,
         end: endOffset,
@@ -1100,20 +1139,23 @@ export function createPromptState(input: PromptInput): PromptState {
       part.source.text.value = text
     }
 
-    if (part.type === "file") {
-      const prev = parts.findIndex((item) => item.type === "file" && item.url === part.url)
-      if (prev !== -1) {
-        const mark = [...marks.entries()].find((item) => item[1] === prev)?.[0]
-        if (mark !== undefined) {
-          area.extmarks.delete(mark)
-        }
-        parts = parts.filter((_, idx) => idx !== prev)
-        marks = new Map(
-          [...marks.entries()]
-            .filter((item) => item[0] !== mark)
-            .map((item) => [item[0], item[1] > prev ? item[1] - 1 : item[1]]),
-        )
+    const prev =
+      part.type === "file"
+        ? parts.findIndex((item) => item.type === "file" && item.url === part.url)
+        : part.type === "skill"
+          ? parts.findIndex((item) => item.type === "skill" && item.id === part.id)
+          : -1
+    if (prev !== -1) {
+      const mark = [...marks.entries()].find((item) => item[1] === prev)?.[0]
+      if (mark !== undefined) {
+        area.extmarks.delete(mark)
       }
+      parts = parts.filter((_, idx) => idx !== prev)
+      marks = new Map(
+        [...marks.entries()]
+          .filter((item) => item[0] !== mark)
+          .map((item) => [item[0], item[1] > prev ? item[1] - 1 : item[1]]),
+      )
     }
 
     const id = area.extmarks.create({
@@ -1535,6 +1577,7 @@ export function createPromptState(input: PromptInput): PromptState {
       if (!applyingPaste && area && area.plainText !== draft.text) revision += 1
       input.onInputClear()
       syncDraft()
+      input.onDraftChange?.(draft)
       refresh()
       scheduleRows()
     },

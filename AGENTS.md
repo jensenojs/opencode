@@ -10,6 +10,11 @@
 - The script discovers the server with `opencode service status`, injects its private local credential from `opencode service get password`, and uses the `dev` TUI storage channel so tabs and other client-local state match the installed client.
 - Prefer `dev:live` over plain `bun run dev` for this workflow. An implicit managed-service connection may replace the live server when the worktree client version differs; explicit `--server` warns and continues without replacing it.
 
+## Local zom build
+
+- Rebuild and install the local zom binary with `script/zom-build.sh`; it pins `OPENCODE_CHANNEL=zom`, installs by atomic rename, and fails if the built version does not report the `zom` channel. Do not assemble the build command by hand.
+- The channel names the session database, so a build made with the branch-name fallback reads a different, empty `opencode-<branch>.db` and the existing sessions look lost. The same pin is in `.github/workflows/zom-release.yml`.
+
 ## TUI Stories
 
 - When a user asks for a TUI story, add a fixture-driven story under `packages/tui/src/feature-plugins/system/storybook` and register it in `index.tsx`.

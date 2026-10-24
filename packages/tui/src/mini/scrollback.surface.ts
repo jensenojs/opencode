@@ -477,6 +477,7 @@ export class RunScrollbackStream {
 
     if (
       body.type !== "structured" &&
+      !commit.settled &&
       (entryCanStream(commit, body) || (commit.kind === "tool" && commit.phase === "final" && body.type === "markdown"))
     ) {
       await this.writeStreaming(commit, body)
