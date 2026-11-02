@@ -36,3 +36,5 @@ logs/
 *.bun-build
 tsconfig.tsbuildinfo
 /artifacts/
+.artifacts/
+.artifacts/

@@ -155,7 +155,7 @@ export function createMiniHost(input: {
         return openEditor(options)
       },
     },
-    paths: { home: paths.home },
+    paths: { home: paths.home, state: paths.state },
     signals: {
       sigint: signal("SIGINT"),
       sigusr2: signal("SIGUSR2"),

@@ -1594,6 +1594,36 @@ describe("V2 mini transport", () => {
     await transport.close()
   })
 
+  test("auto accept replies without blocking the footer", async () => {
+    const events = feed()
+    events.push(connected())
+    const client = sdk({ streams: [events] })
+    const replies: unknown[] = []
+    spyOn(client.permission, "reply").mockImplementation((request) => {
+      replies.push(request)
+      return ok(undefined) as never
+    })
+    const ui = footer()
+    const transport = await createSessionTransport({
+      sdk: client,
+      sessionID: "ses_1",
+      thinking: false,
+      footer: ui.api,
+      permissions: "autoaccept",
+    })
+    events.push({
+      id: "evt_permission",
+      created: 0,
+      type: "permission.asked",
+      data: { id: "per_1", sessionID: "ses_1", action: "read", resources: ["/tmp/file"] },
+    })
+
+    await Bun.sleep(0)
+    expect(replies).toEqual([{ sessionID: "ses_1", requestID: "per_1", decision: "once" }])
+    expect(ui.events.some((event) => event.type === "stream.view" && event.view.type === "permission")).toBe(false)
+    await transport.close()
+  })
+
   test("shows V2 blockers and replies through the runtime-owned session API", async () => {
     const events = feed()
     events.push(connected())

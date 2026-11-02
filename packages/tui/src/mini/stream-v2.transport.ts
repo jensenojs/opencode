@@ -49,6 +49,9 @@ type StreamInput = {
   sessionID: string
   thinking: boolean
   tools?: boolean
+  // The main TUI's session.permissions setting. Carried here so the footer
+  // honours the same switch instead of asking for requests nobody answers.
+  permissions?: "prompt" | "autoaccept"
   replay?: boolean
   replayLimit?: number
   footer: FooterApi
@@ -480,6 +483,14 @@ async function resolveSelectedModel(
 export async function createSessionTransport(input: StreamInput): Promise<SessionTransport> {
   const controller = new AbortController()
   let sdk = input.sdk
+  // Same switch the main TUI route honours: in autoaccept the footer must answer
+  // "once" instead of blocking on a request it will never show.
+  const autoAccept = input.permissions === "autoaccept"
+  const acceptWithoutAsking = (request: { sessionID: string; id: string }) => {
+    void sdk.permission
+      .reply({ sessionID: request.sessionID, requestID: request.id, decision: "once" })
+      .catch(() => {})
+  }
   let generation = 0
   let activeAttempt: Attempt | undefined
   let settlementClient: OpenCodeClient | undefined
@@ -999,6 +1010,10 @@ export async function createSessionTransport(input: StreamInput): Promise<Sessio
     for (const message of projected) renderMessage(message, next.render)
     state.permissions = await resolvePermissionSources(client, permissions, attempt)
     if (!current(attempt)) return
+    if (autoAccept) {
+      for (const request of state.permissions) acceptWithoutAsking(request)
+      state.permissions = []
+    }
     pruneToolSources()
     state.forms = forms
     state.globalForms = globals
@@ -1355,6 +1370,10 @@ export async function createSessionTransport(input: StreamInput): Promise<Sessio
       return
     }
     if (event.type === "permission.asked") {
+      if (autoAccept) {
+        acceptWithoutAsking(event.data)
+        return
+      }
       if (!state.permissions.some((item) => item.id === event.data.id))
         state.permissions.push(permissionTool(event.data, state.toolSources))
       syncBlockers()
