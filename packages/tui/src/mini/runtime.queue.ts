@@ -10,7 +10,7 @@
 // Resolves when the footer closes and all in-flight work finishes.
 import { SessionMessage } from "@opencode/schema/session-message"
 import { Locale } from "../util/locale"
-import { isCompactCommand, isExitCommand, isNewCommand } from "./prompt.shared"
+import { isCompactCommand, isExitCommand, isNewCommand, renameCommand } from "./prompt.shared"
 import type { FooterApi, FooterEvent, RunDelivery, RunPrompt } from "./types"
 
 type Trace = {
@@ -25,6 +25,8 @@ export type QueueInput = {
   onAdmissionError?: (prompt: RunPrompt, error: unknown) => void | Promise<void>
   onNewSession?: () => void | Promise<void>
   onCompact?: () => void | Promise<void>
+  // Local session rename: title "" asks the server to regenerate it.
+  onRename?: (title: string) => void
   admit: (prompt: RunPrompt, delivery: RunDelivery, signal: AbortSignal) => Promise<void>
   settle: () => Promise<void>
   run: (prompt: RunPrompt, signal: AbortSignal, admitted: () => void) => Promise<void>
@@ -250,6 +252,12 @@ export async function runPromptQueue(input: QueueInput): Promise<void> {
 
     if (prompt.mode !== "shell" && isExitCommand(prompt.text)) {
       input.footer.close()
+      return
+    }
+
+    const rename = prompt.mode !== "shell" ? renameCommand(prompt.text) : undefined
+    if (rename !== undefined && input.onRename) {
+      input.onRename(rename)
       return
     }
 

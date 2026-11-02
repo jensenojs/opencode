@@ -21,6 +21,7 @@ import { Model } from "../model.js"
 import { Mcp } from "../mcp/index.js"
 import { Session } from "../session.js"
 import { InstructionEntry } from "../session/instruction-entry.js"
+import { SessionTitle } from "../session/title.js"
 import { PersistentPty } from "../persistent-pty.js"
 import { Provider } from "../provider.js"
 import { Reference } from "../reference.js"
@@ -77,6 +78,7 @@ export const make = Effect.fn("PluginHost.make")(function* (
   const hooks = yield* PluginHooks.Service
   const sessions = yield* Session.Service
   const instructionEntries = yield* InstructionEntry.Service
+  const titles = yield* SessionTitle.Service
   const persistentPty = yield* PersistentPty.Service
   const locations = yield* LocationServiceMap.Service
   const worktrees = yield* Worktree.Service
@@ -618,7 +620,11 @@ export const make = Effect.fn("PluginHost.make")(function* (
       compact: sessions.compact,
       update: Effect.fn(function* (input) {
         yield* sessions.get(input.sessionID)
-        if (input.title !== undefined) yield* sessions.rename({ sessionID: input.sessionID, title: input.title })
+        // Same semantics as the HTTP endpoint (packages/server/src/handlers/session.ts): an
+        // empty title asks for a regeneration from history instead of renaming to "".
+        if (input.title === "") yield* titles.generate(input.sessionID)
+        else if (input.title !== undefined)
+          yield* sessions.rename({ sessionID: input.sessionID, title: input.title })
         if (input.metadata !== undefined)
           yield* sessions.setMetadata({ sessionID: input.sessionID, metadata: input.metadata })
         if (input.permissions !== undefined)
@@ -681,6 +687,7 @@ export const requirements = LayerNode.group([
   PluginHooks.node,
   Session.node,
   InstructionEntry.node,
+  SessionTitle.node,
   PersistentPty.node,
   LocationServiceMap.node,
 ])

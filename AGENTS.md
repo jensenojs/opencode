@@ -16,6 +16,11 @@
 - Without `noDefaults`, Playwright applies light-mode media emulation during attachment. An app following the system theme then flashes light until the connection closes. The option also preserves the existing focus and other media preferences.
 - Do not emulate a color scheme or reduced-motion preference on the user's live window unless explicitly requested; use an isolated test context for those scenarios.
 
+## Local zom build
+
+- Rebuild and install the local zom binary with `script/zom-build.sh`; it pins `OPENCODE_CHANNEL=zom`, installs by atomic rename, and fails if the built version does not report the `zom` channel. Do not assemble the build command by hand.
+- The channel names the session database, so a build made with the branch-name fallback reads a different, empty `opencode-<branch>.db` and the existing sessions look lost. The same pin is in `.github/workflows/zom-release.yml`.
+
 ## TUI Stories
 
 - When a user asks for a TUI story, add a fixture-driven story under `packages/tui/src/feature-plugins/system/storybook` and register it in `index.tsx`.

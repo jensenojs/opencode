@@ -27,7 +27,7 @@ function host(): MiniHost {
     stdout: { write() {} },
     files: { readText: async () => "" },
     editor: { open: async () => undefined },
-    paths: { home: "/home/test" },
+    paths: { home: "/home/test", state: "/home/test" },
     signals: {
       sigint: { subscribe: () => () => {} },
       sigusr2: { subscribe: () => () => {} },
@@ -495,6 +495,7 @@ describe("run interactive runtime", () => {
     let getDirectory: (() => string) | undefined
     let findFiles: ((query: string) => Promise<string[]>) | undefined
     let transportLocation: unknown
+    let foundFiles: string[] | undefined
     let runtimeConfig: LifecycleInput["tuiConfig"] | undefined
     const tuiConfig = createTuiResolvedConfig({ keybinds: { "variant.cycle": "ctrl+g" } })
     const catalogs = stubCatalogLists(sdk, {
@@ -506,7 +507,10 @@ describe("run interactive runtime", () => {
         workspaceID: "work-1",
         project: { id: "pro-1", directory: "/session", canonical: "/session" },
       },
-      data: [{ path: "src/index.ts", type: "file" }],
+      data: [
+        { path: "src/index.ts", type: "file" },
+        { path: "src/", type: "directory" },
+      ],
     } as never)
 
     const task = runInteractiveDeferredMode(
@@ -553,7 +557,7 @@ describe("run interactive runtime", () => {
         streamTransport: Promise.resolve({
           createSessionTransport: async (input) => {
             transportLocation = input.location
-            await findFiles?.("index")
+            foundFiles = await findFiles?.("index")
             setTimeout(() => input.footer.close(), 0)
             return {
               runPromptTurn: async () => {},
@@ -586,6 +590,7 @@ describe("run interactive runtime", () => {
     expect(catalogs.agent).toHaveBeenCalledWith(query, { signal: expect.any(AbortSignal) })
     expect(catalogs.reference).toHaveBeenCalledWith(query, { signal: expect.any(AbortSignal) })
     expect(catalogs.command).toHaveBeenCalledWith(query, { signal: expect.any(AbortSignal) })
-    expect(fileFind).toHaveBeenCalledWith({ query: "index", type: "file", ...query })
+    expect(fileFind).toHaveBeenCalledWith({ query: "index", ...query })
+    expect(foundFiles).toEqual(["src/index.ts", "src/"])
   })
 })
