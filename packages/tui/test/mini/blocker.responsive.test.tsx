@@ -369,6 +369,7 @@ test.each(["once", "always", "reject"] as const)(
       findFiles: async () => [],
       agents: [],
       references: [],
+      skills: [],
       agent: undefined,
       modelLabel: "GPT-5",
       model: undefined,
@@ -386,6 +387,7 @@ test.each(["once", "always", "reject"] as const)(
           splash: "hide",
           work_spinner: "block-soft-slide",
           mono: false,
+          status_name: "agent",
         },
       },
       onPermissionReply: (reply) => {

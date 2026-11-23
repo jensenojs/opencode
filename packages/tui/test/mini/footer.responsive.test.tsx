@@ -29,6 +29,7 @@ async function setup(mono = false) {
     findFiles: async () => ["packages/tui/src/mini/footer.view.tsx", "packages/tui/src/mini/", "src/\u6587\u4ef6.ts"],
     agents: [{ id: "build", name: "Build", mode: "primary", hidden: false }],
     references: [],
+    skills: [],
     agent: "build",
     modelLabel: "GPT-5",
     model: undefined,
@@ -46,7 +47,7 @@ async function setup(mono = false) {
     subscribeThemeSignal: () => () => {},
   })
   footer.onPrompt((prompt) => prompts.push(prompt))
-  footer.event({ type: "catalog", agents: [], references: [], commands: [] })
+  footer.event({ type: "catalog", agents: [], references: [], skills: [], commands: [] })
   return {
     ...app,
     footer,
@@ -147,10 +148,10 @@ test.each([false, true])(
 test("ctrl+l clears the split-footer screen without wiping scrollback", async () => {
   const app = await setup()
   try {
-    const clear = spyOn(app.renderer, "resetSplitFooterForReplay").mockImplementation(() => {})
+    const replay = spyOn(app.footer, "replay").mockImplementation(() => {})
     await app.settle()
     app.mockInput.pressKey("l", { ctrl: true })
-    expect(clear).toHaveBeenCalledWith({ clearSavedLines: false })
+    expect(replay).toHaveBeenCalled()
   } finally {
     app.cleanup()
   }
@@ -159,7 +160,7 @@ test("ctrl+l clears the split-footer screen without wiping scrollback", async ()
 test("command palette can clear the screen", async () => {
   const app = await setup()
   try {
-    const clear = spyOn(app.renderer, "resetSplitFooterForReplay").mockImplementation(() => {})
+    const replay = spyOn(app.footer, "replay").mockImplementation(() => {})
     await app.settle()
     app.mockInput.pressKey("p", { ctrl: true })
     await app.settle()
@@ -167,7 +168,7 @@ test("command palette can clear the screen", async () => {
     await app.settle()
     expect(app.selected()).toContain("Clear screen")
     app.mockInput.pressEnter()
-    expect(clear).toHaveBeenCalledWith({ clearSavedLines: false })
+    expect(replay).toHaveBeenCalled()
   } finally {
     app.cleanup()
   }
@@ -413,6 +414,7 @@ test.each([false, true])("composer and autocomplete share the physical height bu
       type: "catalog",
       agents: [],
       references: [],
+      skills: [],
       commands: Array.from({ length: 24 }, (_, index) => ({
         name: `cmd-${String(index).padStart(2, "0")}`,
         description: "Optional command description",

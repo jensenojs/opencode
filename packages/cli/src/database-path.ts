@@ -1,13 +1,11 @@
 import path from "node:path"
-import { OPENCODE_CHANNEL } from "./version"
 
+// One session store. Upstream derives the database name from the build channel, so
+// every build — and every branch-name fallback — gets its own opencode-<channel>.db,
+// and whichever process starts the background service first decides which store the
+// whole machine reads. Here the name is fixed; OPENCODE_DB still overrides the path
+// for throwaway work such as exporting an archived store.
 export function databasePath(data: string) {
-  const filename =
-    process.env.OPENCODE_DB ??
-    (["latest", "dev", "beta", "next", "prod"].includes(OPENCODE_CHANNEL) ||
-    process.env.OPENCODE_DISABLE_CHANNEL_DB === "1" ||
-    process.env.OPENCODE_DISABLE_CHANNEL_DB === "true"
-      ? "opencode.db"
-      : `opencode-${OPENCODE_CHANNEL.replace(/[^a-zA-Z0-9._-]/g, "-")}.db`)
+  const filename = process.env.OPENCODE_DB ?? "opencode.db"
   return filename === ":memory:" ? filename : path.resolve(data, filename)
 }

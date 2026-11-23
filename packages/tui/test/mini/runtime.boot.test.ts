@@ -47,6 +47,7 @@ describe("run runtime boot", () => {
       splash: "show",
       work_spinner: "block-soft-slide",
       mono: false,
+      status_name: "agent",
     })
     expect(
       resolveMiniSettings({
@@ -70,7 +71,11 @@ describe("run runtime boot", () => {
       splash: "hide",
       work_spinner: "block-low-comet",
       mono: true,
+      status_name: "agent",
     })
+    // The status-line name is fork-owned: it comes from the mini state file,
+    // never from the shared tui config.
+    expect(resolveMiniSettings(undefined, { status_name: "session" }).status_name).toBe("session")
   })
 
   test("loads v2 providers and models for model selector data", async () => {

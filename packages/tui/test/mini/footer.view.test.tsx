@@ -21,7 +21,7 @@ import {
   RunCommandMenuBody,
   RunModelSelectBody,
   RunSettingsBody,
-  RunSubagentSelectBody,
+  RunSessionPickerBody,
   RunVariantSelectBody,
 } from "../../src/mini/footer.command"
 import { RunFooterView } from "../../src/mini/footer.view"
@@ -55,7 +55,10 @@ import { createTuiResolvedConfig } from "../fixture/tui-runtime"
 import { tmpdir } from "../fixture/fixture"
 import { diffImageFixture } from "../fixture/diff-image"
 
-const tuiConfig = createTuiResolvedConfig()
+// mini's dismiss key owns ctrl+x in the shipped build, while these tests use
+// ctrl+x as the leader (the upstream default). Unbind dismiss here so the
+// leader combinations under test are not consumed by the bare key.
+const tuiConfig = createTuiResolvedConfig({ keybinds: { "zom.dismiss": "none" } })
 const themeRenderer = await createTestRenderer({})
 afterAll(async () => {
   themeRenderer.renderer.destroy()
@@ -140,6 +143,7 @@ function footerState(input: Partial<FooterState> = {}) {
     phase: "idle",
     status: "",
     notice: "",
+    blocked: false,
     model: "gpt-5",
     usage: undefined,
     first: false,
@@ -153,6 +157,7 @@ async function renderFooter(
   input: {
     tuiConfig?: RunTuiConfig
     commands?: RunCommand[]
+    findFiles?: (query: string) => Promise<string[]>
     theme?: () => RunTheme
     providers?: RunProvider[]
     agents?: RunAgent[]
@@ -190,9 +195,10 @@ async function renderFooter(
       <Keymap.Provider config={config}>
         <RunFooterView
           directory={() => "/tmp"}
-          findFiles={async () => []}
+          findFiles={input.findFiles ?? (async () => [])}
           agents={() => input.agents ?? []}
           references={() => []}
+          skills={() => []}
           commands={() => input.commands ?? []}
           providers={() => input.providers}
           currentAgent={() => input.currentAgent ?? "Build"}
@@ -1047,6 +1053,7 @@ test.each([false, true])("settings change preferences and preview the work spinn
 
     app.mockInput.pressKey("ARROW_DOWN")
     app.mockInput.pressKey("ARROW_DOWN")
+    app.mockInput.pressKey("ARROW_DOWN")
     app.mockInput.pressKey("ARROW_RIGHT")
     await app.renderOnce()
     expect(settings().splash).toBe("hide")
@@ -1203,12 +1210,17 @@ test("direct subagent panel toggles between active and inactive subagents", asyn
   const app = await testRender(
     () => (
       <box width={100} height={RUN_SUBAGENT_PANEL_ROWS}>
-        <RunSubagentSelectBody
+        <RunSessionPickerBody
           theme={() => RUN_THEME_FALLBACK.footer}
+          tab={() => "subagents"}
+          onTab={() => {}}
           tabs={tabs}
           current={current}
+          subagentLabel="subagent"
+          shellsLabel="shell"
           onClose={() => {}}
           onSelect={() => {}}
+          onKill={() => {}}
           onRows={(value) => {
             rows = value
           }}
@@ -1226,24 +1238,24 @@ test("direct subagent panel toggles between active and inactive subagents", asyn
     const frame = app.captureCharFrame()
     const list = panelMenu(app.renderer.root)
 
-    expect(frame).toContain("Select subagent")
+    expect(frame).toContain("subagent")
     expect(frame).toContain("Inspect auth flow")
     expect(frame).not.toContain("Write migration plan")
     expect(frame).not.toContain("done")
-    expect(frame).toContain("tab show inactive")
+    expect(frame).toContain("ctrl+a show inactive")
     expect(frame).not.toContain("┌")
     expect(frame).not.toContain("┃")
     expectPaletteList(list, 0)
     expect(rows).toBe(7)
 
-    app.mockInput.pressKey("TAB")
+    app.mockInput.pressKey("a", { ctrl: true })
     await app.renderOnce()
     const inactive = app.captureCharFrame()
 
     expect(inactive).not.toContain("Inspect auth flow")
     expect(inactive).toContain("Write migration plan")
     expect(inactive).toContain("done")
-    expect(inactive).toContain("tab show active")
+    expect(inactive).toContain("ctrl+a show active")
   } finally {
     app.renderer.destroy()
   }
@@ -1260,12 +1272,17 @@ test("direct subagent panel closes when moving up from the first item", async ()
   const app = await testRender(
     () => (
       <box width={100} height={RUN_SUBAGENT_PANEL_ROWS}>
-        <RunSubagentSelectBody
+        <RunSessionPickerBody
           theme={() => RUN_THEME_FALLBACK.footer}
+          tab={() => "subagents"}
+          onTab={() => {}}
           tabs={tabs}
           current={current}
+          subagentLabel="subagent"
+          shellsLabel="shell"
           onClose={() => closed++}
           onSelect={() => {}}
+          onKill={() => {}}
         />
       </box>
     ),
@@ -1922,6 +1939,7 @@ test.each([8, 12])("production footer grows for wrapped instructions in %i rows"
     findFiles: async () => [],
     agents: [{ id: "build", name: "Build", mode: "primary", hidden: false }],
     references: [],
+    skills: [],
     agent: "build",
     modelLabel: "GPT-5",
     model: undefined,
@@ -1939,6 +1957,7 @@ test.each([8, 12])("production footer grows for wrapped instructions in %i rows"
         splash: "show",
         work_spinner: "block-soft-slide",
         mono: false,
+        status_name: "agent",
       },
     },
     onPermissionReply: () => {},
@@ -2007,6 +2026,7 @@ test.each(["ctrl+i", "none"])("takeovers preserve configured shortcuts with hidd
       splash: "show",
       work_spinner: "block-soft-slide",
       mono: false,
+      status_name: "agent",
     },
   })
   try {
@@ -2341,6 +2361,7 @@ test("direct footer hides routine activity and shows explicit notices", async ()
       splash: "show",
       work_spinner: "block-soft-slide",
       mono: true,
+      status_name: "agent",
     },
     mono: true,
     onStatus: (value) => (status = value),
