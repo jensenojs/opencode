@@ -134,6 +134,13 @@ jobs:
           bun-version: "1.4.4"
       - name: Install dependencies
         run: bun install
+      - name: Derive semantic version from zom tag
+        id: semver
+        run: |
+          tag="${{ needs.sync.outputs.zom_tag || github.ref_name }}"
+          version="$(bash script/zom-version.sh "$tag")"
+          echo "zom tag $tag -> $version"
+          echo "value=$version" >> "$GITHUB_OUTPUT"
       - name: Build single-file binary
         run: bun run --cwd packages/cli build --single --skip-web-ui --skip-install
         env:
@@ -142,6 +149,9 @@ jobs:
           # 注册一个自己的 service，客户端状态跟着散开。会话库不受影响——
           # packages/cli/src/database-path.ts 把库名钉死成 opencode.db。
           OPENCODE_CHANNEL: zom
+          # 版本号由 tag 派生（script/zom-version.sh），不再让上游 previewBuildNumber
+          # 用 run number / 构建时间填充——否则同一份 commit 每个平台报不同版本。
+          OPENCODE_VERSION: ${{ steps.semver.outputs.value }}
       - name: Collect binary
         run: |
           mkdir -p out
