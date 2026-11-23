@@ -8,7 +8,7 @@ import type { LocationRef } from "@opencode/client/promise"
 import { resolve } from "../config"
 import { loadRunProviders } from "./catalog.shared"
 import { resolveCurrentSession, sessionHistory } from "./session.shared"
-import type { MiniSettings, RunInput, RunPrompt, RunProvider, RunTuiConfig } from "./types"
+import type { MiniSettings, MiniStatusName, RunInput, RunPrompt, RunProvider, RunTuiConfig } from "./types"
 import { pickVariant } from "./variant.shared"
 
 export type ModelInfo = {
@@ -84,7 +84,10 @@ export async function resolveRunTuiConfig(
     .catch(() => defaultRunTuiConfig(platform))
 }
 
-export function resolveMiniSettings(config?: { mini?: Partial<MiniSettings> }): MiniSettings {
+export function resolveMiniSettings(
+  config?: { mini?: Partial<Omit<MiniSettings, "status_name">> },
+  stored?: { status_name?: MiniStatusName },
+): MiniSettings {
   return {
     thinking: config?.mini?.thinking ?? "show",
     tools: config?.mini?.tools ?? "hide",
@@ -94,5 +97,7 @@ export function resolveMiniSettings(config?: { mini?: Partial<MiniSettings> }): 
     splash: config?.mini?.splash ?? "show",
     work_spinner: config?.mini?.work_spinner ?? "block-soft-slide",
     mono: config?.mini?.mono ?? false,
+    // Not a config key: the shared tui config is stock's file (see settings.store.ts).
+    status_name: stored?.status_name ?? "agent",
   }
 }

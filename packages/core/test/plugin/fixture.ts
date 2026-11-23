@@ -36,6 +36,7 @@ import { Session } from "@opencode/core/session"
 import { SessionInbox } from "@opencode/core/session/inbox"
 import { SharedCache } from "@opencode/core/shared-cache"
 import { InstructionEntry } from "@opencode/core/session/instruction-entry"
+import { SessionTitle } from "@opencode/core/session/title"
 import { PersistentPty } from "@opencode/core/persistent-pty"
 import { LocationServiceMap } from "@opencode/core/location-service-map"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
@@ -85,6 +86,10 @@ const generateLayer = Layer.succeed(
 )
 
 const configLayer = Config.testLayer()
+
+// Title generation is a model call; plugins only need the service to exist so
+// session.update("") can ask for a regeneration.
+const titleLayer = Layer.succeed(SessionTitle.Service, SessionTitle.Service.of({ generate: () => Effect.void }))
 
 const permissionLayer = Layer.succeed(
   Permission.Service,
@@ -145,6 +150,7 @@ export const makePluginTestLayer = (
       Session.node,
       SharedCache.node,
       InstructionEntry.node,
+      SessionTitle.node,
       PersistentPty.node,
       LocationServiceMap.node,
       Permission.node,
@@ -167,6 +173,7 @@ export const makePluginTestLayer = (
       Config.node.replace(configLayer),
       Mcp.node.replace(emptyMcpLayer),
       Generate.node.replace(generate),
+      SessionTitle.node.replace(titleLayer),
       Permission.node.replace(permission),
       offlineModels,
       ...replacements,
