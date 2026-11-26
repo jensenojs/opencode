@@ -1623,18 +1623,57 @@ pub enum Incoming {
     Disconnected(String),
 }
 
-/// `projectedMessages`: the newest `limit` messages, oldest first.
+/// Whether `message` draws anything. The rest are bookkeeping rows (`idle`, `location-switched`, `model-switched`,
+/// `system`, ...) that `message` renders as nothing; every summon from another directory appends a pair of them.
+fn renders(message: &SessionMessageInfo) -> bool {
+    matches!(
+        message,
+        SessionMessageInfo::User(_)
+            | SessionMessageInfo::Compaction(_)
+            | SessionMessageInfo::Assistant(_)
+            | SessionMessageInfo::Skill(_)
+            | SessionMessageInfo::Shell(_)
+    )
+}
+
+/// `projectedMessages`: the newest `limit` messages that draw something, oldest first, with the bookkeeping rows
+/// between them. `--replay-limit` counts what the user sees: a window of bookkeeping rows alone replays nothing.
 pub async fn messages(client: &Client, session: &str, limit: u32) -> Result<Vec<SessionMessageInfo>, String> {
-    let input = MessageListInput {
-        session_id: SessionID(session.to_owned()),
-        limit: Some(i64::from(limit)),
-        order: Some(MessageListInputOrder::Desc),
-        ..Default::default()
-    };
-    let call = Client::message_list_call(&input).map_err(|error| error.to_string())?;
-    let list: Value = client.json(call).await.map_err(|error| error.to_string())?;
-    let data = list["data"].as_array().map(Vec::as_slice).unwrap_or_default();
-    Ok(data.iter().rev().map(decode_message).collect())
+    // The server caps a page at 100 rows.
+    const PAGE: i64 = 100;
+    let want = limit as usize;
+    let mut newest_first = Vec::new();
+    let mut shown = 0usize;
+    let mut cursor: Option<String> = None;
+    while shown < want {
+        // The first page is sized by what is still missing, so a small limit stays one small request; later pages
+        // never go below a few rows, or a run of bookkeeping rows would cost a request each.
+        let page = i64::try_from(want - shown).unwrap_or(PAGE).clamp(8, PAGE);
+        // A cursor carries its own order, and the server rejects the two together.
+        let input = MessageListInput {
+            session_id: SessionID(session.to_owned()),
+            limit: Some(page),
+            order: cursor.is_none().then_some(MessageListInputOrder::Desc),
+            cursor: cursor.take(),
+            ..Default::default()
+        };
+        let call = Client::message_list_call(&input).map_err(|error| error.to_string())?;
+        let list: Value = client.json(call).await.map_err(|error| error.to_string())?;
+        for value in list["data"].as_array().map(Vec::as_slice).unwrap_or_default() {
+            let message = decode_message(value);
+            shown += usize::from(renders(&message));
+            newest_first.push(message);
+            if shown == want {
+                break;
+            }
+        }
+        cursor = list["cursor"]["next"].as_str().map(str::to_owned);
+        if cursor.is_none() {
+            break;
+        }
+    }
+    newest_first.reverse();
+    Ok(newest_first)
 }
 
 /// Decodes a listed message once, at the boundary. A message this client cannot read is kept as unknown, so one
@@ -2168,6 +2207,27 @@ mod tests {
         assert_eq!(texts(&transcript.replayed(&listed, true)), texts(&fresh));
         transcript.begin_wait("msg_p");
         assert_eq!(transcript.event(&ended).patch, None);
+    }
+
+    /// `--replay-limit` counts what draws: bookkeeping rows are listed but replay nothing, so a window of them alone
+    /// must not be mistaken for history.
+    #[test]
+    fn only_messages_that_draw_count_toward_the_replay_limit() {
+        let drawn = [
+            json!({ "id": "msg_u", "type": "user", "text": "hi" }),
+            json!({ "id": "msg_a", "type": "assistant", "content": [] }),
+        ]
+        .map(message);
+        assert!(drawn.iter().all(renders));
+        let bookkeeping = [
+            json!({ "id": "msg_i", "type": "idle", "outcome": "succeeded" }),
+            json!({ "id": "msg_l", "type": "location-switched", "location": { "directory": "/tmp" },
+                "projectID": "prj_1", "subpath": "", "previous": { "location": { "directory": "/" } } }),
+            json!({ "id": "msg_m", "type": "model-switched", "model": { "id": "m", "providerID": "p" },
+                "previous": { "id": "n", "providerID": "p" } }),
+        ]
+        .map(message);
+        assert!(bookkeeping.iter().all(|row| !renders(row)));
     }
 
     /// One message the client cannot read does not fail the list.
