@@ -118,6 +118,7 @@ type RunFooterViewProps = {
   onFormCancel: (input: FormCancel) => void | Promise<void>
   onCycle: () => void
   onInterrupt: () => boolean
+  onBackground?: () => void
   onQueuedPromptAction?: (action: QueuedPromptAction, inboxID: string) => Promise<void>
   listShells?: () => Promise<FooterShellRow[]>
   killShell?: (id: string) => Promise<void>
@@ -730,6 +731,22 @@ export function RunFooterView(props: RunFooterViewProps) {
         title: "Cycle model variant",
         group: "Model",
         run: props.onCycle,
+      },
+    ],
+  }))
+
+  // A running turn can be waiting on a foreground shell or subagent. session.background moves every such
+  // job to the service's background and the turn goes on; it does not dismiss mini, so the next prompt can
+  // be typed at once. With nothing blocking, the server answers with an empty move and nothing happens.
+  Keymap.createLayer(() => ({
+    enabled: active().type === "prompt" && route().type === "composer" && busy() && !!props.onBackground,
+    priority: 1,
+    commands: [
+      {
+        id: "session.background",
+        title: "Background blocking work",
+        group: "Session",
+        run: () => props.onBackground?.(),
       },
     ],
   }))

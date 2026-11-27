@@ -86,6 +86,7 @@ export type LifecycleInput = {
   onModelSelect?: (model: NonNullable<RunInput["model"]>) => CycleResult | void | Promise<CycleResult | void>
   onVariantSelect?: (variant: string | undefined) => CycleResult | void | Promise<CycleResult | void>
   onInterrupt?: () => void
+  onBackground?: () => void
   onQueuedPromptAction?: (action: QueuedPromptAction, inboxID: string) => Promise<void>
   listShells?: () => Promise<FooterShellRow[]>
   killShell?: (id: string) => Promise<void>
@@ -262,6 +263,7 @@ export async function createRuntimeLifecycle(input: LifecycleInput): Promise<Lif
     onModelSelect: input.onModelSelect,
     onVariantSelect: input.onVariantSelect,
     onInterrupt: input.onInterrupt,
+    onBackground: input.onBackground,
     onQueuedPromptAction: input.onQueuedPromptAction,
     listShells: input.listShells,
     killShell: input.killShell,
