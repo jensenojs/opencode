@@ -510,6 +510,46 @@ describe("V2 mini transport", () => {
     await transport.close()
   })
 
+  test("replay limit counts messages that draw and pages past bookkeeping rows", async () => {
+    const events = feed()
+    events.push(connected())
+    const client = sdk({ streams: [events], messages: { ses_1: [] } })
+    // Every summon from another directory appends a location-switched/idle pair, so the newest rows can all be
+    // bookkeeping that draws nothing. The user's last words sit behind them.
+    const newest = Array.from({ length: 8 }, (_, index) => ({
+      id: `msg_idle_${index}`,
+      type: "idle" as const,
+      outcome: "succeeded" as const,
+      time: { created: 20 - index },
+    }))
+    const older = [
+      { id: "msg_a", type: "assistant" as const, agent: "build", model: { providerID: "test", id: "m" }, content: [{ type: "text" as const, text: "the answer" }], time: { created: 3 } },
+      { id: "msg_u", type: "user" as const, text: "the question", files: [], agents: [], time: { created: 2 } },
+    ]
+    const requests: Array<Record<string, unknown>> = []
+    spyOn(client.message, "list").mockImplementation((request) => {
+      requests.push({ ...request })
+      return request.cursor === undefined
+        ? ok({ data: newest, cursor: { next: "older" } })
+        : ok({ data: older, cursor: {} })
+    })
+    const ui = footer()
+    const transport = await createSessionTransport({
+      sdk: client,
+      sessionID: "ses_1",
+      thinking: false,
+      replay: true,
+      replayLimit: 2,
+      footer: ui.api,
+    })
+
+    expect(ui.commits.map((commit) => commit.text)).toContain("the question")
+    expect(ui.commits.map((commit) => commit.text)).toContain("the answer")
+    // The server rejects a cursor together with an order: only the first page names one.
+    expect(requests.map((request) => [request.order, request.cursor])).toEqual([["desc", undefined], [undefined, "older"]])
+    await transport.close()
+  })
+
   test("shows an active compaction boundary before live summary output without history replay", async () => {
     const events = feed()
     events.push(connected())

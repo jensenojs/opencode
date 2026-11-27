@@ -910,13 +910,34 @@ export async function createSessionTransport(input: StreamInput): Promise<Sessio
     }
   }
 
-  const projectedMessages = async (client: OpenCodeClient, signal: AbortSignal) =>
-    (
-      await client.message.list(
-        { sessionID: input.sessionID, limit: input.replayLimit ?? 200, order: "desc" },
+  // The newest `replayLimit` messages that draw something, oldest first, with the bookkeeping rows between them.
+  // `idle`, `location-switched`, `model-switched` and `system` rows draw nothing, and every summon from another
+  // directory appends a pair of them, so counting rows would leave a window of nothing but bookkeeping and replay
+  // an empty screen. The server caps a page at 100 rows; a cursor carries its own order.
+  const drawn = new Set<SessionMessageInfo["type"]>(["user", "skill", "shell", "compaction", "assistant"])
+  const projectedMessages = async (client: OpenCodeClient, signal: AbortSignal) => {
+    const want = input.replayLimit ?? 200
+    const newestFirst: SessionMessageInfo[] = []
+    let shown = 0
+    let cursor: string | undefined
+    while (shown < want) {
+      // A small limit stays one small request; later pages never shrink below a few rows.
+      const limit = Math.min(100, Math.max(8, want - shown))
+      const page = await client.message.list(
+        cursor === undefined
+          ? { sessionID: input.sessionID, limit, order: "desc" }
+          : { sessionID: input.sessionID, limit, cursor },
         { signal },
       )
-    ).data.toReversed()
+      for (const message of page.data) {
+        newestFirst.push(message)
+        if (drawn.has(message.type) && ++shown === want) break
+      }
+      cursor = page.cursor.next ?? undefined
+      if (cursor === undefined) break
+    }
+    return newestFirst.toReversed()
+  }
 
   const waitForSession = async (initial: OpenCodeClient) => {
     let client = initial
